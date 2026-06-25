@@ -65,9 +65,11 @@ pub async fn filter_unhandled_video_pages(
 
 /// 标记跨源重复视频为已完成，并引用已完成视频的下载路径，避免重复下载。
 /// 对 video 及其所有 page 都标记完成状态并引用源视频的路径，返回被标记的视频数量。
+/// 每个被标记的视频会单独打印一条 info 日志，包含视频标题、BV 号与视频源名。
 pub async fn mark_cross_source_duplicates(
     additional_expr: SimpleExpr,
     connection: &DatabaseConnection,
+    source_name: &str,
 ) -> Result<usize> {
     // 查出当前源中 bvid 已在其他源下载完成、但自身未完成的视频
     let duplicate_videos = video::Entity::find()
@@ -135,6 +137,10 @@ pub async fn mark_cross_source_duplicates(
     let video_models: Vec<video::ActiveModel> = to_mark
         .into_iter()
         .map(|(v, path)| {
+            info!(
+                "跨源去重：视频「{}」({}) 已在视频源「{}」下载完成，已标记为完成并引用路径",
+                v.name, v.bvid, source_name
+            );
             let mut am: video::ActiveModel = v.into();
             am.download_status = Set(completed_video_status);
             am.path = Set(path);

@@ -203,7 +203,12 @@ pub async fn download_unprocessed_videos(
     let downloader = Downloader::new(bili_client.client.clone());
     let cx = DownloadContext::new(bili_client, video_source, template, connection, &downloader, config);
     // 跨源去重：将 bvid 已在其他源下载完成的视频标记为完成并引用其路径，避免重复下载
-    let duplicate_count = mark_cross_source_duplicates(video_source.filter_expr(), connection).await?;
+    let duplicate_count = mark_cross_source_duplicates(
+        video_source.filter_expr(),
+        connection,
+        video_source.display_name(),
+    )
+    .await?;
     if duplicate_count > 0 {
         info!(
             "跨源去重：{} 个视频已在其他视频源下载完成，已标记为完成并引用路径",
