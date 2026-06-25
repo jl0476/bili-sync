@@ -5,7 +5,7 @@ use rand::seq::SliceRandom;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict, SimpleExpr};
-use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, QuerySelect, Statement};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, QuerySelect, QueryTrait, Statement};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::VideoInfo;
