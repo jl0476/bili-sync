@@ -4,7 +4,7 @@ use itertools::Itertools;
 use rand::seq::SliceRandom;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::{Expr, OnConflict, Query, SimpleExpr};
+use sea_orm::sea_query::{Expr, OnConflict, SimpleExpr};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, Statement};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -37,10 +37,10 @@ pub async fn filter_unhandled_video_pages(
     connection: &DatabaseConnection,
 ) -> Result<Vec<(video::Model, Vec<page::Model>)>> {
     // 跨源去重：排除 bvid 已在其他源下载完成的视频
-    let completed_bvids = Query::select()
+    let completed_bvids = video::Entity::find()
+        .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
+        .select_only()
         .column(video::Column::Bvid)
-        .from(video::Entity)
-        .and_where(Expr::col((video::Entity, video::Column::DownloadStatus)).gte(STATUS_COMPLETED))
         .as_query()
         .to_owned();
 
