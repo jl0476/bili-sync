@@ -206,7 +206,7 @@ pub async fn download_unprocessed_videos(
     let duplicate_count = mark_cross_source_duplicates(
         video_source.filter_expr(),
         connection,
-        video_source.display_name(),
+        &video_source.display_name(),
     )
     .await?;
     if duplicate_count > 0 {
