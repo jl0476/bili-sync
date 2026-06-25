@@ -40,9 +40,6 @@
 	let forceReset = false;
 
 	function getStatusText(status: number): string {
-		if (video.is_cross_source) {
-			return '已在其他视频源下载';
-		}
 		if (status === 7) {
 			return '已完成';
 		} else if (status === 0) {
@@ -77,10 +74,6 @@
 		if (!shouldDownload) {
 			// 被过滤规则排除，显示为“跳过”
 			return { text: '跳过', style: 'bg-gray-100 text-gray-700' };
-		}
-		if (video.is_cross_source) {
-			// 跨源去重引用：文件已在其他视频源下载，本源仅引用其结果
-			return { text: '其他源', style: 'bg-blue-100 text-blue-700' };
 		}
 		const completed = downloadStatus.filter((status) => status === 7).length;
 		const total = downloadStatus.length;

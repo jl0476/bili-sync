@@ -23,7 +23,7 @@ use crate::api::response::{
     VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse, ValidatedJson};
-use crate::utils::status::{PageStatus, STATUS_CROSS_SOURCE, VideoStatus};
+use crate::utils::status::{PageStatus, VideoStatus};
 
 pub(super) fn router() -> Router {
     Router::new()
@@ -74,17 +74,13 @@ pub async fn get_videos(
     } else {
         (0, 10)
     };
-    let mut videos = query
-        .order_by_desc(video::Column::Id)
-        .into_partial_model::<VideoInfo>()
-        .paginate(&db, page_size)
-        .fetch_page(page)
-        .await?;
-    for video in videos.iter_mut() {
-        video.is_cross_source = (video.download_status & STATUS_CROSS_SOURCE) != 0;
-    }
     Ok(ApiResponse::ok(VideosResponse {
-        videos,
+        videos: query
+            .order_by_desc(video::Column::Id)
+            .into_partial_model::<VideoInfo>()
+            .paginate(&db, page_size)
+            .fetch_page(page)
+            .await?,
         total_count,
     }))
 }
@@ -93,7 +89,7 @@ pub async fn get_video(
     Path(id): Path<i32>,
     Extension(db): Extension<DatabaseConnection>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
-    let (mut video_info, mut pages_info) = tokio::try_join!(
+    let (video_info, pages_info) = tokio::try_join!(
         video::Entity::find_by_id(id).into_partial_model::<VideoInfo>().one(&db),
         page::Entity::find()
             .filter(page::Column::VideoId.eq(id))
@@ -101,14 +97,9 @@ pub async fn get_video(
             .into_partial_model::<PageInfo>()
             .all(&db)
     )?;
-    let mut video_info = match video_info {
-        Some(v) => v,
-        None => return Err(InnerApiError::NotFound(id).into()),
+    let Some(video_info) = video_info else {
+        return Err(InnerApiError::NotFound(id).into());
     };
-    video_info.is_cross_source = (video_info.download_status & STATUS_CROSS_SOURCE) != 0;
-    for page in pages_info.iter_mut() {
-        page.is_cross_source = (page.download_status & STATUS_CROSS_SOURCE) != 0;
-    }
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages: pages_info,
@@ -131,14 +122,12 @@ pub async fn reset_video_status(
     let Some(mut video_info) = video_info else {
         return Err(InnerApiError::NotFound(id).into());
     };
-    video_info.is_cross_source = (video_info.download_status & STATUS_CROSS_SOURCE) != 0;
     let resetted_pages_info = pages_info
         .into_iter()
         .filter_map(|mut page_info| {
             let mut page_status = PageStatus::from(page_info.download_status);
             if (request.force && page_status.force_reset_failed()) || page_status.reset_failed() {
-                page_info.download_status = (page_status.into()) & !STATUS_CROSS_SOURCE;
-                page_info.is_cross_source = false;
+                page_info.download_status = page_status.into();
                 Some(page_info)
             } else {
                 None
@@ -152,9 +141,7 @@ pub async fn reset_video_status(
         video_resetted = true;
     }
     let resetted_videos_info = if video_resetted {
-        // 重置后清除跨源去重标记位，使视频恢复为普通未完成状态重新走下载流程
-        video_info.download_status = (video_status.into()) & !STATUS_CROSS_SOURCE;
-        video_info.is_cross_source = false;
+        video_info.download_status = video_status.into();
         vec![&video_info]
     } else {
         vec![]
@@ -221,7 +208,6 @@ pub async fn clear_and_reset_video_status(
             favorite_id: video_info.favorite_id,
             submission_id: video_info.submission_id,
             watch_later_id: video_info.watch_later_id,
-            is_cross_source: false,
         },
     }))
 }
@@ -284,8 +270,7 @@ pub async fn reset_filtered_video_status(
                 video_resetted = true;
             }
             if video_resetted {
-                // 重置后清除跨源去重标记位
-                video_info.download_status = (video_status.into()) & !STATUS_CROSS_SOURCE;
+                video_info.download_status = video_status.into();
                 Some(video_info)
             } else {
                 None

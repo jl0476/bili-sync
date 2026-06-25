@@ -11,9 +11,6 @@ pub static STATUS_NOT_STARTED: u32 = 0b000;
 pub(super) static STATUS_MAX_RETRY: u32 = 0b100;
 pub static STATUS_OK: u32 = 0b111;
 pub static STATUS_COMPLETED: u32 = 1 << 31;
-/// 跨源去重标记位：表示该视频/分页是通过引用其他视频源的下载结果标记为完成的，并未在本源真正下载。
-/// 该位不参与子任务状态的位运算（子任务仅占用低 15 位），因此不影响下载过滤与状态过滤的判断。
-pub static STATUS_CROSS_SOURCE: u32 = 1 << 30;
 
 /// 用来表示下载的状态，不想写太多列了，所以仅使用一个 u32 表示。
 /// 从低位开始，固定每三位表示一种子任务的状态。

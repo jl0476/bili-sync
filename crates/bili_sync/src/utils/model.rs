@@ -12,7 +12,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, QuerySelect, Que
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::VideoInfo;
 use crate::config::Config;
-use crate::utils::status::{PageStatus, STATUS_CROSS_SOURCE, STATUS_COMPLETED, VideoStatus};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED};
 
 /// 筛选未填充的视频
 pub async fn filter_unfilled_videos(
@@ -117,7 +117,7 @@ pub async fn mark_cross_source_duplicates(
     let completed_video_ids: Vec<i32> = completed_videos.iter().map(|v| v.id).collect();
 
     // 仅保留能找到引用 path 的被去重视频，组装 video ActiveModel
-    let completed_video_status: u32 = VideoStatus::from([7u32, 7, 7, 7, 7]).into() | STATUS_CROSS_SOURCE;
+    let completed_video_status: u32 = VideoStatus::from([7u32, 7, 7, 7, 7]).into();
     let to_mark: Vec<(video::Model, String)> = duplicate_videos
         .into_iter()
         .filter_map(|v| {
@@ -163,7 +163,7 @@ pub async fn mark_cross_source_duplicates(
         })
         .collect();
 
-    let completed_page_status: u32 = PageStatus::from([7u32, 7, 7, 7, 7]).into() | STATUS_CROSS_SOURCE;
+    let completed_page_status: u32 = PageStatus::from([7u32, 7, 7, 7, 7]).into();
     let page_models: Vec<page::ActiveModel> = duplicate_pages
         .into_iter()
         .filter_map(|p| {

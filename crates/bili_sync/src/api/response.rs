@@ -82,10 +82,6 @@ pub struct VideoInfo {
     pub favorite_id: Option<i32>,
     pub submission_id: Option<i32>,
     pub watch_later_id: Option<i32>,
-    /// 是否为跨源去重引用：由 download_status 的 STATUS_CROSS_SOURCE 位派生，查询后由 API 填充
-    #[sea_orm(ignore)]
-    #[serde(default)]
-    pub is_cross_source: bool,
 }
 
 #[derive(Serialize, DerivePartialModel, FromQueryResult)]
@@ -97,10 +93,6 @@ pub struct PageInfo {
     pub name: String,
     #[serde(serialize_with = "serde_page_download_status")]
     pub download_status: u32,
-    /// 是否为跨源去重引用：由 download_status 的 STATUS_CROSS_SOURCE 位派生，查询后由 API 填充
-    #[sea_orm(ignore)]
-    #[serde(default)]
-    pub is_cross_source: bool,
 }
 
 #[derive(Serialize, DerivePartialModel, FromQueryResult, Clone, Copy)]
