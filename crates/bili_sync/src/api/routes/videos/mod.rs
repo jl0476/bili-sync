@@ -137,7 +137,7 @@ pub async fn reset_video_status(
         .filter_map(|mut page_info| {
             let mut page_status = PageStatus::from(page_info.download_status);
             if (request.force && page_status.force_reset_failed()) || page_status.reset_failed() {
-                page_info.download_status = u32::from(page_status) & !STATUS_CROSS_SOURCE;
+                page_info.download_status = (page_status.into()) & !STATUS_CROSS_SOURCE;
                 page_info.is_cross_source = false;
                 Some(page_info)
             } else {
@@ -153,7 +153,7 @@ pub async fn reset_video_status(
     }
     let resetted_videos_info = if video_resetted {
         // 重置后清除跨源去重标记位，使视频恢复为普通未完成状态重新走下载流程
-        video_info.download_status = u32::from(video_status) & !STATUS_CROSS_SOURCE;
+        video_info.download_status = (video_status.into()) & !STATUS_CROSS_SOURCE;
         video_info.is_cross_source = false;
         vec![&video_info]
     } else {
@@ -285,7 +285,7 @@ pub async fn reset_filtered_video_status(
             }
             if video_resetted {
                 // 重置后清除跨源去重标记位
-                video_info.download_status = u32::from(video_status) & !STATUS_CROSS_SOURCE;
+                video_info.download_status = (video_status.into()) & !STATUS_CROSS_SOURCE;
                 Some(video_info)
             } else {
                 None
