@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, anyhow};
 use bili_sync_entity::*;
 use itertools::Itertools;
@@ -10,7 +12,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, QuerySelect, Que
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::VideoInfo;
 use crate::config::Config;
-use crate::utils::status::STATUS_COMPLETED;
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED};
 
 /// 筛选未填充的视频
 pub async fn filter_unfilled_videos(
@@ -59,6 +61,126 @@ pub async fn filter_unhandled_video_pages(
         .all(connection)
         .await
         .context("filter unhandled video pages failed")
+}
+
+/// 标记跨源重复视频为已完成，并引用已完成视频的下载路径，避免重复下载。
+/// 对 video 及其所有 page 都标记完成状态并引用源视频的路径，返回被标记的视频数量。
+pub async fn mark_cross_source_duplicates(
+    additional_expr: SimpleExpr,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    // 查出当前源中 bvid 已在其他源下载完成、但自身未完成的视频
+    let duplicate_videos = video::Entity::find()
+        .filter(additional_expr)
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::ShouldDownload.eq(true))
+        .filter(video::Column::DownloadStatus.lt(STATUS_COMPLETED))
+        .filter(video::Column::SinglePage.is_not_null())
+        .filter(
+            video::Column::Bvid.in_subquery(
+                video::Entity::find()
+                    .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
+                    .select_only()
+                    .column(video::Column::Bvid)
+                    .as_query()
+                    .to_owned(),
+            ),
+        )
+        .all(connection)
+        .await?;
+
+    if duplicate_videos.is_empty() {
+        return Ok(0);
+    }
+
+    // 被去重视频的 id -> bvid 映射，用于后续 page 按 pid 匹配源视频的 page
+    let duplicate_bvid_by_id: HashMap<i32, String> =
+        duplicate_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
+    let bvids: Vec<String> = duplicate_videos.iter().map(|v| v.bvid.clone()).collect();
+
+    // 查出这些 bvid 对应的、已下载完成且 path 非空的视频（源视频）
+    let completed_videos = video::Entity::find()
+        .filter(video::Column::Bvid.is_in(bvids))
+        .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
+        .filter(video::Column::Path.ne(""))
+        .all(connection)
+        .await?;
+
+    if completed_videos.is_empty() {
+        return Ok(0);
+    }
+
+    let completed_path_by_bvid: HashMap<String, String> =
+        completed_videos.iter().map(|v| (v.bvid.clone(), v.path.clone())).collect();
+    let completed_bvid_by_id: HashMap<i32, String> =
+        completed_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
+    let completed_video_ids: Vec<i32> = completed_videos.iter().map(|v| v.id).collect();
+
+    // 仅保留能找到引用 path 的被去重视频，组装 video ActiveModel
+    let completed_video_status: u32 = VideoStatus::from([7u32, 7, 7, 7, 7]).into();
+    let to_mark: Vec<(video::Model, String)> = duplicate_videos
+        .into_iter()
+        .filter_map(|v| {
+            let path = completed_path_by_bvid.get(&v.bvid).filter(|p| !p.is_empty())?.clone();
+            Some((v, path))
+        })
+        .collect();
+
+    if to_mark.is_empty() {
+        return Ok(0);
+    }
+
+    let marked_count = to_mark.len();
+    let marked_video_ids: Vec<i32> = to_mark.iter().map(|(v, _)| v.id).collect();
+    let video_models: Vec<video::ActiveModel> = to_mark
+        .into_iter()
+        .map(|(v, path)| {
+            let mut am: video::ActiveModel = v.into();
+            am.download_status = Set(completed_video_status);
+            am.path = Set(path);
+            am
+        })
+        .collect();
+    update_videos_model(video_models, connection).await?;
+
+    // 处理对应的 pages：标记完成并引用源视频对应 (bvid, pid) 的 page.path
+    let (duplicate_pages, source_pages) = tokio::try_join!(
+        page::Entity::find()
+            .filter(page::Column::VideoId.is_in(marked_video_ids.clone()))
+            .all(connection),
+        page::Entity::find()
+            .filter(page::Column::VideoId.is_in(completed_video_ids.clone()))
+            .all(connection),
+    )?;
+
+    // 源视频的 pages，按 (bvid, pid) -> page.path
+    let source_page_path: HashMap<(String, i32), String> = source_pages
+        .iter()
+        .filter_map(|p| {
+            let bvid = completed_bvid_by_id.get(&p.video_id)?;
+            let path = p.path.as_ref().filter(|s| !s.is_empty())?;
+            Some(((bvid.clone(), p.pid), path.clone()))
+        })
+        .collect();
+
+    let completed_page_status: u32 = PageStatus::from([7u32, 7, 7, 7, 7]).into();
+    let page_models: Vec<page::ActiveModel> = duplicate_pages
+        .into_iter()
+        .filter_map(|p| {
+            let bvid = duplicate_bvid_by_id.get(&p.video_id)?;
+            let path = source_page_path.get(&(bvid.clone(), p.pid))?;
+            let mut am: page::ActiveModel = p.into();
+            am.download_status = Set(completed_page_status);
+            am.path = Set(Some(path.clone()));
+            Some(am)
+        })
+        .collect();
+
+    if !page_models.is_empty() {
+        update_pages_model(page_models, connection).await?;
+    }
+
+    Ok(marked_count)
 }
 
 /// 尝试创建 Video Model，如果发生冲突则忽略

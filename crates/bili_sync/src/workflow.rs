@@ -21,8 +21,9 @@ use crate::notifier::DownloadNotifyInfo;
 use crate::utils::download_context::DownloadContext;
 use crate::utils::format_arg::{page_format_args, video_format_args};
 use crate::utils::model::{
-    create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages, set_video_models_invalid,
-    update_pages_model, update_video_detail_models, update_videos_model,
+    create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
+    mark_cross_source_duplicates, set_video_models_invalid, update_pages_model,
+    update_video_detail_models, update_videos_model,
 };
 use crate::utils::nfo::{NFO, ToNFO};
 use crate::utils::notify::notify;
@@ -202,6 +203,11 @@ pub async fn download_unprocessed_videos(
     video_source.log_download_video_start();
     let downloader = Downloader::new(bili_client.client.clone());
     let cx = DownloadContext::new(bili_client, video_source, template, connection, &downloader, config);
+    // 跨源去重：将 bvid 已在其他源下载完成的视频标记为完成并引用其路径，避免重复下载
+    let duplicate_count = mark_cross_source_duplicates(video_source.filter_expr(), connection).await?;
+    if duplicate_count > 0 {
+        info!("跨源去重：{} 个视频已在其他视频源下载完成，已标记为完成并引用路径", duplicate_count);
+    }
     let unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
     let mut assigned_upper_ids = HashSet::new();
     let tasks = stream::iter(unhandled_videos_pages)
