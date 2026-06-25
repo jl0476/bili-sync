@@ -7,16 +7,13 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   build-binary:
     name: Build binaries
     uses: ./.github/workflows/build.yaml
-    # build.yaml 内置了前端构建、二进制构建与 Docker 镜像推送（GHCR）
-    permissions:
-      contents: read
-      packages: write
+    # build.yaml 内置了前端构建、二进制构建与 Docker 镜像推送（DockerHub）
+    secrets: inherit
 
   github-release:
     name: Create GitHub Release

@@ -1,11 +1,6 @@
 name: Build Binary
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
   workflow_call:
 

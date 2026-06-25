@@ -9,3 +9,4 @@ jobs:
   build-binary:
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     uses: ./.github/workflows/build.yaml
+    secrets: inherit
