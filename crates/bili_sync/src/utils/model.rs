@@ -12,7 +12,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, QuerySelect, Que
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::VideoInfo;
 use crate::config::Config;
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED};
+use crate::utils::status::{PageStatus, STATUS_COMPLETED, VideoStatus};
 
 /// 筛选未填充的视频
 pub async fn filter_unfilled_videos(
@@ -94,8 +94,7 @@ pub async fn mark_cross_source_duplicates(
     }
 
     // 被去重视频的 id -> bvid 映射，用于后续 page 按 pid 匹配源视频的 page
-    let duplicate_bvid_by_id: HashMap<i32, String> =
-        duplicate_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
+    let duplicate_bvid_by_id: HashMap<i32, String> = duplicate_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
     let bvids: Vec<String> = duplicate_videos.iter().map(|v| v.bvid.clone()).collect();
 
     // 查出这些 bvid 对应的、已下载完成且 path 非空的视频（源视频）
@@ -110,10 +109,11 @@ pub async fn mark_cross_source_duplicates(
         return Ok(0);
     }
 
-    let completed_path_by_bvid: HashMap<String, String> =
-        completed_videos.iter().map(|v| (v.bvid.clone(), v.path.clone())).collect();
-    let completed_bvid_by_id: HashMap<i32, String> =
-        completed_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
+    let completed_path_by_bvid: HashMap<String, String> = completed_videos
+        .iter()
+        .map(|v| (v.bvid.clone(), v.path.clone()))
+        .collect();
+    let completed_bvid_by_id: HashMap<i32, String> = completed_videos.iter().map(|v| (v.id, v.bvid.clone())).collect();
     let completed_video_ids: Vec<i32> = completed_videos.iter().map(|v| v.id).collect();
 
     // 仅保留能找到引用 path 的被去重视频，组装 video ActiveModel
