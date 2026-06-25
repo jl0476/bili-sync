@@ -4,7 +4,7 @@ use itertools::Itertools;
 use rand::seq::SliceRandom;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::{Expr, IntoSubQuery, OnConflict, Query, SimpleExpr};
+use sea_orm::sea_query::{Expr, OnConflict, Query, SimpleExpr};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, Statement};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -41,7 +41,8 @@ pub async fn filter_unhandled_video_pages(
         .column(video::Column::Bvid)
         .from(video::Entity)
         .and_where(Expr::col((video::Entity, video::Column::DownloadStatus)).gte(STATUS_COMPLETED))
-        .take();
+        .as_query()
+        .to_owned();
 
     video::Entity::find()
         .filter(
