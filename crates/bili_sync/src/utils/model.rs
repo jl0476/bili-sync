@@ -4,7 +4,7 @@ use itertools::Itertools;
 use rand::seq::SliceRandom;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::{Expr, OnConflict, SimpleExpr};
+use sea_orm::sea_query::{Expr, IntoSubQuery, OnConflict, Query, SimpleExpr};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, IdenStatic, Statement};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -36,6 +36,13 @@ pub async fn filter_unhandled_video_pages(
     additional_expr: SimpleExpr,
     connection: &DatabaseConnection,
 ) -> Result<Vec<(video::Model, Vec<page::Model>)>> {
+    // 跨源去重：排除 bvid 已在其他源下载完成的视频
+    let completed_bvids = Query::select()
+        .column(video::Column::Bvid)
+        .from(video::Entity)
+        .and_where(Expr::col((video::Entity, video::Column::DownloadStatus)).gte(STATUS_COMPLETED))
+        .take();
+
     video::Entity::find()
         .filter(
             video::Column::Valid
@@ -44,7 +51,8 @@ pub async fn filter_unhandled_video_pages(
                 .and(video::Column::Category.eq(2))
                 .and(video::Column::SinglePage.is_not_null())
                 .and(video::Column::ShouldDownload.eq(true))
-                .and(additional_expr),
+                .and(additional_expr)
+                .and(Expr::col(video::Column::Bvid).not_in_subquery(completed_bvids)),
         )
         .find_with_related(page::Entity)
         .all(connection)
