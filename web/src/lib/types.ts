@@ -39,6 +39,7 @@ export interface VideoInfo {
 	favorite_id?: number;
 	submission_id?: number;
 	watch_later_id?: number;
+	is_cross_source?: boolean;
 }
 
 export interface VideosResponse {
@@ -51,6 +52,7 @@ export interface PageInfo {
 	pid: number;
 	name: string;
 	download_status: [number, number, number, number, number];
+	is_cross_source?: boolean;
 }
 
 export interface VideoResponse {
