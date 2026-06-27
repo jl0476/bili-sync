@@ -125,3 +125,15 @@ SvelteKit static SPA (Svelte 5, Tailwind CSS 4, Vite). Routes: `/` (dashboard), 
 - Use `anyhow::Result` / `anyhow::Context` for error handling. `ExecutionStatus` in `error.rs` is the domain-specific error type for download outcomes.
 - Config is hot-reloaded; avoid reading config values directly from disk at runtime — use the in-memory `VersionedConfig` / `arc-swap` mechanism.
 - The Bilibili client is a shared `Arc<BiliClient>` passed into both tasks.
+
+### Frontend
+
+- **Svelte 5 runes mode**: use `$props()`, `$bindable()`, `$state()`, `$derived()` — not legacy `export let` / `$:` reactive statements.
+- **UI components** from `bits-ui` are re-exported under `$lib/components/ui/*/index.js` and imported as namespace objects: `import * as Dialog from '$lib/components/ui/dialog/index.js'`.
+- **Icons**: `import { SomeIcon } from '@lucide/svelte/icons'` (tree-shakeable, named imports only).
+- **Toast notifications**: `import { toast } from 'svelte-sonner'`. Use `toast.success(msg, { description, duration })`, `toast.error(msg, { description: (error as ApiError).message })`, `toast.warning(msg, { ... })`.
+- **API client**: singleton `api` from `$lib/api`. Methods return `{ data, error }`. Types defined in `$lib/types.ts`.
+- **Table data mutation**: when a table is sorted or filtered, always use `id`-based lookup (`findIndex(s => s.id === ...)`) to locate the original array element — never use the `{#each}` loop `index`, which reflects the displayed order, not the source array.
+- **`{#each}` keys**: prefer stable keys like `(source.id)` over `(index)`, especially when the list can be reordered or items removed.
+- **Tailwind CSS 4**: uses `@tailwindcss/vite` plugin, CSS variables for theming (`bg-secondary`, `text-muted-foreground`, etc.). No separate `tailwind.config.js`.
+- **Formatting**: `prettier` with `prettier-plugin-svelte`, `prettier-plugin-tailwindcss`, `prettier-plugin-organize-imports`. Run `bun run format` before committing.
