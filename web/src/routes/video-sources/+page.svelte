@@ -20,7 +20,10 @@
 		Trash2Icon,
 		CircleCheckBigIcon,
 		CircleXIcon,
-		RefreshCwIcon
+		RefreshCwIcon,
+		ArrowUpDownIcon,
+		ArrowUpIcon,
+		ArrowDownIcon
 	} from '@lucide/svelte/icons';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { toast } from 'svelte-sonner';
@@ -34,6 +37,7 @@
 	let videoSourcesData: VideoSourcesDetailsResponse | null = null;
 	let loading = false;
 	let activeTab = 'favorites';
+	let latestAtSortOrder: 'none' | 'asc' | 'desc' = 'none';
 
 	// 添加对话框状态
 	let showAddDialog = false;
@@ -44,7 +48,6 @@
 	let showEditDialog = false;
 	let editingSource: VideoSourceDetail | null = null;
 	let editingType = '';
-	let editingIdx: number = 0;
 	let saving = false;
 
 	// 规则评估对话框状态
@@ -57,7 +60,6 @@
 	let showRemoveDialog = false;
 	let removeSource: VideoSourceDetail | null = null;
 	let removeType = '';
-	let removeIdx: number = 0;
 	let removing = false;
 
 	// 全量更新对话框状态
@@ -103,10 +105,9 @@
 	}
 
 	// 打开编辑对话框
-	function openEditDialog(type: string, source: VideoSourceDetail, idx: number) {
+	function openEditDialog(type: string, source: VideoSourceDetail) {
 		editingSource = source;
 		editingType = type;
-		editingIdx = idx;
 		editForm = {
 			path: source.path,
 			enabled: source.enabled,
@@ -122,10 +123,9 @@
 		showEvaluateDialog = true;
 	}
 
-	function openRemoveDialog(type: string, source: VideoSourceDetail, idx: number) {
+	function openRemoveDialog(type: string, source: VideoSourceDetail) {
 		removeSource = source;
 		removeType = type;
-		removeIdx = idx;
 		showRemoveDialog = true;
 	}
 
@@ -188,15 +188,18 @@
 				const sources = videoSourcesData[
 					editingType as keyof VideoSourcesDetailsResponse
 				] as VideoSourceDetail[];
-				sources[editingIdx] = {
-					...sources[editingIdx],
-					path: editForm.path,
-					enabled: editForm.enabled,
-					rule: editForm.rule,
-					useDynamicApi: editForm.useDynamicApi,
-					ruleDisplay: response.data.ruleDisplay
-				};
-				videoSourcesData = { ...videoSourcesData };
+				const idx = sources.findIndex((s) => s.id === editingSource.id);
+				if (idx !== -1) {
+					sources[idx] = {
+						...sources[idx],
+						path: editForm.path,
+						enabled: editForm.enabled,
+						rule: editForm.rule,
+						useDynamicApi: editForm.useDynamicApi,
+						ruleDisplay: response.data.ruleDisplay
+					};
+					videoSourcesData = { ...videoSourcesData };
+				}
 			}
 			showEditDialog = false;
 			toast.success('保存成功');
@@ -235,12 +238,15 @@
 		try {
 			let response = await api.removeVideoSource(removeType, removeSource.id);
 			if (response && response.data) {
-				if (videoSourcesData) {
+				if (videoSourcesData && removeSource) {
 					const sources = videoSourcesData[
 						removeType as keyof VideoSourcesDetailsResponse
 					] as VideoSourceDetail[];
-					sources.splice(removeIdx, 1);
-					videoSourcesData = { ...videoSourcesData };
+					const idx = sources.findIndex((s) => s.id === removeSource.id);
+					if (idx !== -1) {
+						sources.splice(idx, 1);
+						videoSourcesData = { ...videoSourcesData };
+					}
 				}
 				showRemoveDialog = false;
 				toast.success('删除视频源成功');
@@ -256,9 +262,19 @@
 		}
 	}
 
+	function toggleLatestAtSort() {
+		latestAtSortOrder = latestAtSortOrder === 'none' ? 'desc' : latestAtSortOrder === 'desc' ? 'asc' : 'none';
+	}
+
 	function getSourcesForTab(tabValue: string): VideoSourceDetail[] {
 		if (!videoSourcesData) return [];
-		return videoSourcesData[tabValue as keyof VideoSourcesDetailsResponse] as VideoSourceDetail[];
+		const sources = videoSourcesData[tabValue as keyof VideoSourcesDetailsResponse] as VideoSourceDetail[];
+		if (latestAtSortOrder === 'none') return sources;
+		return [...sources].sort((a, b) => {
+			const aTime = a.latestRowAt ? new Date(a.latestRowAt).getTime() : 0;
+			const bTime = b.latestRowAt ? new Date(b.latestRowAt).getTime() : 0;
+			return latestAtSortOrder === 'asc' ? aTime - bTime : bTime - aTime;
+		});
 	}
 
 	// 打开添加对话框
@@ -366,14 +382,29 @@
 									<Table.Row>
 										<Table.Head class="w-[20%]">名称</Table.Head>
 										<Table.Head class="w-[30%]">下载路径</Table.Head>
-										<Table.Head class="w-[15%]">最新视频时间</Table.Head>
+										<Table.Head class="w-[15%]">
+											<button
+												type="button"
+												class="hover:text-foreground flex cursor-pointer items-center gap-1 text-muted-foreground transition-colors"
+												onclick={toggleLatestAtSort}
+											>
+												最新视频时间
+												{#if latestAtSortOrder === 'asc'}
+													<ArrowUpIcon class="h-3.5 w-3.5" />
+												{:else if latestAtSortOrder === 'desc'}
+													<ArrowDownIcon class="h-3.5 w-3.5" />
+												{:else}
+													<ArrowUpDownIcon class="h-3.5 w-3.5 opacity-50" />
+												{/if}
+											</button>
+										</Table.Head>
 										<Table.Head class="w-[15%]">过滤规则</Table.Head>
 										<Table.Head class="w-[10%]">启用状态</Table.Head>
 										<Table.Head class="w-[10%] text-right">操作</Table.Head>
 									</Table.Row>
 								</Table.Header>
 								<Table.Body>
-									{#each sources as source, index (index)}
+									{#each sources as source (source.id)}
 										<Table.Row>
 											<Table.Cell class="font-medium">{source.name}</Table.Cell>
 											<Table.Cell>
@@ -444,7 +475,7 @@
 														<Button
 															size="sm"
 															variant="outline"
-															onclick={() => openEditDialog(key, source, index)}
+															onclick={() => openEditDialog(key, source)}
 															class="h-8 w-8 p-0"
 														>
 															<SquarePenIcon class="h-3 w-3" />
@@ -490,7 +521,7 @@
 															<Button
 																size="sm"
 																variant="outline"
-																onclick={() => openRemoveDialog(key, source, index)}
+																onclick={() => openRemoveDialog(key, source)}
 																class="h-8 w-8 p-0"
 															>
 																<Trash2Icon class="h-3 w-3" />
