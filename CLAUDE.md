@@ -82,7 +82,7 @@ Cargo workspace with 3 crates:
 |---|---|
 | `crates/bili_sync` | Main binary: API client, download engine, HTTP server, scheduling |
 | `crates/bili_sync_entity` | SeaORM entity models (video, page, favorite, collection, submission, watch_later, config) |
-| `crates/bili_sync_migration` | SQLite schema migrations (12 migrations, tracking evolution since 2024) |
+| `crates/bili_sync_migration` | SQLite schema migrations (11 migrations, from 2024-03 to 2026-03; latest adds `staff` column to videos) |
 
 ### Main crate module layout (`crates/bili_sync/src/`)
 
@@ -116,7 +116,7 @@ Cargo workspace with 3 crates:
 
 ### Frontend (`web/`)
 
-SvelteKit static SPA (Svelte 5, Tailwind CSS 4, Vite). Routes: `/` (dashboard), `/video-sources`, `/videos`, `/video/[id]`, `/settings`, `/logs` (WebSocket), `/me`. API client in `web/src/lib/api.ts`. Uses `bits-ui`, `layerchart`, and `qrcode` packages.
+SvelteKit static SPA (Svelte 5, Tailwind CSS 4, Vite). Routes: `/` (dashboard), `/video-sources`, `/videos`, `/video/[id]`, `/settings`, `/logs` (WebSocket), `/me/favorites`, `/me/collections`, `/me/uppers` (quick subscription pages). Sidebar navigation defined in `app-sidebar.svelte` with grouped sections (总览 / 内容管理 / 快捷订阅 / footer). API client in `web/src/lib/api.ts`. Uses `bits-ui` (component primitives), `layerchart`, `qrcode`, `svelte-sonner` (toasts), `@lucide/svelte` (icons), `mode-watcher` (dark/light mode). Key shared components: `rule-editor.svelte` (filter rule editing), `video-card.svelte`, `status-editor.svelte`, `status-filter.svelte`, `pagination.svelte`, `search-bar.svelte`, `subscription-card.svelte` / `subscription-dialog.svelte`.
 
 ## Code Conventions
 
