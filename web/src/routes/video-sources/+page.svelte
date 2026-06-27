@@ -263,12 +263,15 @@
 	}
 
 	function toggleLatestAtSort() {
-		latestAtSortOrder = latestAtSortOrder === 'none' ? 'desc' : latestAtSortOrder === 'desc' ? 'asc' : 'none';
+		latestAtSortOrder =
+			latestAtSortOrder === 'none' ? 'desc' : latestAtSortOrder === 'desc' ? 'asc' : 'none';
 	}
 
 	function getSourcesForTab(tabValue: string): VideoSourceDetail[] {
 		if (!videoSourcesData) return [];
-		const sources = videoSourcesData[tabValue as keyof VideoSourcesDetailsResponse] as VideoSourceDetail[];
+		const sources = videoSourcesData[
+			tabValue as keyof VideoSourcesDetailsResponse
+		] as VideoSourceDetail[];
 		if (latestAtSortOrder === 'none') return sources;
 		return [...sources].sort((a, b) => {
 			const aTime = a.latestRowAt ? new Date(a.latestRowAt).getTime() : 0;
@@ -385,7 +388,7 @@
 										<Table.Head class="w-[15%]">
 											<button
 												type="button"
-												class="hover:text-foreground flex cursor-pointer items-center gap-1 text-muted-foreground transition-colors"
+												class="hover:text-foreground text-muted-foreground flex cursor-pointer items-center gap-1 transition-colors"
 												onclick={toggleLatestAtSort}
 											>
 												最新视频时间
