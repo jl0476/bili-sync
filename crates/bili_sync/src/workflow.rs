@@ -201,7 +201,6 @@ pub async fn download_unprocessed_videos(
 ) -> Result<DownloadNotifyInfo> {
     video_source.log_download_video_start();
     let downloader = Downloader::new(bili_client.client.clone());
-    let cx = DownloadContext::new(bili_client, video_source, template, connection, &downloader, config);
     // 跨源去重：将 bvid 已在其他源下载完成的视频标记为完成并引用其路径，避免重复下载
     let duplicate_count =
         mark_cross_source_duplicates(video_source.filter_expr(), connection, &video_source.display_name()).await?;
@@ -211,6 +210,21 @@ pub async fn download_unprocessed_videos(
             duplicate_count
         );
     }
+    let source_filter_option = video_source
+        .filter_option()
+        .as_ref()
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?;
+    let filter_option = source_filter_option.as_ref().unwrap_or(&config.filter_option);
+    let cx = DownloadContext::new(
+        bili_client,
+        video_source,
+        template,
+        connection,
+        &downloader,
+        config,
+        filter_option,
+    );
     let unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
     let mut assigned_upper_ids = HashSet::new();
     let tasks = stream::iter(unhandled_videos_pages)
@@ -462,32 +476,32 @@ pub async fn download_page(
     let base_path = dunce::canonicalize(base_path).context("canonicalize base path failed")?;
     let (poster_path, video_path, nfo_path, danmaku_path, fanart_path, subtitle_path) = if is_single_page {
         (
-            base_path.join(format!("{}-poster.jpg", &base_name)),
-            base_path.join(format!("{}.mp4", &base_name)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
-            Some(base_path.join(format!("{}-fanart.jpg", &base_name))),
-            base_path.join(format!("{}.srt", &base_name)),
+            base_path.join(format!("{}-poster.jpg", base_name)),
+            base_path.join(format!("{}.mp4", base_name)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
+            Some(base_path.join(format!("{}-fanart.jpg", base_name))),
+            base_path.join(format!("{}.srt", base_name)),
         )
     } else {
         (
             base_path
                 .join("Season 1")
-                .join(format!("{} - S01E{:0>2}-thumb.jpg", &base_name, page_model.pid)),
+                .join(format!("{} - S01E{:0>2}-thumb.jpg", base_name, page_model.pid)),
             base_path
                 .join("Season 1")
-                .join(format!("{} - S01E{:0>2}.mp4", &base_name, page_model.pid)),
+                .join(format!("{} - S01E{:0>2}.mp4", base_name, page_model.pid)),
             base_path
                 .join("Season 1")
-                .join(format!("{} - S01E{:0>2}.nfo", &base_name, page_model.pid)),
+                .join(format!("{} - S01E{:0>2}.nfo", base_name, page_model.pid)),
             base_path
                 .join("Season 1")
-                .join(format!("{} - S01E{:0>2}.zh-CN.default.ass", &base_name, page_model.pid)),
+                .join(format!("{} - S01E{:0>2}.zh-CN.default.ass", base_name, page_model.pid)),
             // 对于多页视频，会在上一步 fetch_video_poster 中获取剧集的 fanart，无需在此处下载单集的
             None,
             base_path
                 .join("Season 1")
-                .join(format!("{} - S01E{:0>2}.srt", &base_name, page_model.pid)),
+                .join(format!("{} - S01E{:0>2}.srt", base_name, page_model.pid)),
         )
     };
     let dimension = match (page_model.width, page_model.height) {
@@ -626,7 +640,7 @@ pub async fn fetch_page_video(
     let streams = bili_video
         .get_page_analyzer(page_info)
         .await?
-        .best_stream(&cx.config.filter_option)?;
+        .best_stream(cx.filter_option)?;
     match streams {
         BestStream::Mixed(mix_stream) => {
             cx.downloader
