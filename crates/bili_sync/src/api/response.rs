@@ -218,6 +218,8 @@ pub struct VideoSourceDetail {
     pub rule_display: Option<String>,
     #[serde(default)]
     pub use_dynamic_api: Option<bool>,
+    #[serde(default)]
+    pub upper_id: Option<i64>,
     pub enabled: bool,
     pub latest_row_at: Option<DateTime>,
 }

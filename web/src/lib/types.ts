@@ -223,6 +223,7 @@ export interface VideoSourceDetail {
 	rule: Rule | null;
 	ruleDisplay: string | null;
 	useDynamicApi: boolean | null;
+	upperId: number | null;
 	enabled: boolean;
 	latestRowAt: string | null;
 }
