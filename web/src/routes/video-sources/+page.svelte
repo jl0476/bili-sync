@@ -23,7 +23,8 @@
 		RefreshCwIcon,
 		ArrowUpDownIcon,
 		ArrowUpIcon,
-		ArrowDownIcon
+		ArrowDownIcon,
+		ExternalLinkIcon
 	} from '@lucide/svelte/icons';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { toast } from 'svelte-sonner';
@@ -88,6 +89,44 @@
 		submissions: { label: '用户投稿', icon: UserIcon },
 		watch_later: { label: '稍后再看', icon: ClockIcon }
 	} as const;
+
+	// 各 tab 的表头列宽,投稿 tab 多了「UP 主 ID」一列,需要把其它列略微收窄以保持 100%
+	// 类型使用 Record<string, ...> 是因为 {#each Object.entries(...)} 的 key 被推断为 string
+	const HEAD_WIDTHS: Record<string, Record<string, string>> = {
+		favorites: {
+			name: 'w-[20%]',
+			path: 'w-[30%]',
+			latest: 'w-[15%]',
+			rule: 'w-[15%]',
+			enabled: 'w-[10%]',
+			actions: 'w-[10%]'
+		},
+		collections: {
+			name: 'w-[20%]',
+			path: 'w-[30%]',
+			latest: 'w-[15%]',
+			rule: 'w-[15%]',
+			enabled: 'w-[10%]',
+			actions: 'w-[10%]'
+		},
+		submissions: {
+			name: 'w-[16%]',
+			upperId: 'w-[12%]',
+			path: 'w-[26%]',
+			latest: 'w-[13%]',
+			rule: 'w-[13%]',
+			enabled: 'w-[10%]',
+			actions: 'w-[10%]'
+		},
+		watch_later: {
+			name: 'w-[20%]',
+			path: 'w-[30%]',
+			latest: 'w-[15%]',
+			rule: 'w-[15%]',
+			enabled: 'w-[10%]',
+			actions: 'w-[10%]'
+		}
+	};
 
 	// 数据加载
 	async function loadVideoSources() {
@@ -383,9 +422,12 @@
 							<Table.Root>
 								<Table.Header>
 									<Table.Row>
-										<Table.Head class="w-[20%]">名称</Table.Head>
-										<Table.Head class="w-[30%]">下载路径</Table.Head>
-										<Table.Head class="w-[15%]">
+										<Table.Head class={HEAD_WIDTHS[key].name}>名称</Table.Head>
+										{#if key === 'submissions'}
+											<Table.Head class={HEAD_WIDTHS[key].upperId}>UP 主 ID</Table.Head>
+										{/if}
+										<Table.Head class={HEAD_WIDTHS[key].path}>下载路径</Table.Head>
+										<Table.Head class={HEAD_WIDTHS[key].latest}>
 											<button
 												type="button"
 												class="hover:text-foreground text-muted-foreground flex cursor-pointer items-center gap-1 transition-colors"
@@ -401,15 +443,32 @@
 												{/if}
 											</button>
 										</Table.Head>
-										<Table.Head class="w-[15%]">过滤规则</Table.Head>
-										<Table.Head class="w-[10%]">启用状态</Table.Head>
-										<Table.Head class="w-[10%] text-right">操作</Table.Head>
+										<Table.Head class={HEAD_WIDTHS[key].rule}>过滤规则</Table.Head>
+										<Table.Head class={HEAD_WIDTHS[key].enabled}>启用状态</Table.Head>
+										<Table.Head class="{HEAD_WIDTHS[key].actions} text-right">操作</Table.Head>
 									</Table.Row>
 								</Table.Header>
 								<Table.Body>
 									{#each sources as source (source.id)}
 										<Table.Row>
 											<Table.Cell class="font-medium">{source.name}</Table.Cell>
+											{#if key === 'submissions'}
+												<Table.Cell>
+													{#if source.upperId !== null}
+														<a
+															href={`https://space.bilibili.com/${source.upperId}`}
+															target="_blank"
+															rel="noopener noreferrer"
+															class="text-foreground/80 hover:text-primary inline-flex items-center gap-1 font-mono text-xs underline-offset-4 hover:underline"
+														>
+															{source.upperId}
+															<ExternalLinkIcon class="h-3 w-3" />
+														</a>
+													{:else}
+														<span class="text-muted-foreground text-xs">-</span>
+													{/if}
+												</Table.Cell>
+											{/if}
 											<Table.Cell>
 												<div
 													class="bg-secondary hover:bg-secondary/80 flex w-fit cursor-text items-center gap-2 rounded-md px-2.5 py-1.5 transition-colors"

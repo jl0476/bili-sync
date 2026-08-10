@@ -130,7 +130,8 @@ pub async fn get_video_sources_details(
                 submission::Column::Enabled,
                 submission::Column::Rule,
                 submission::Column::UseDynamicApi,
-                submission::Column::LatestRowAt
+                submission::Column::LatestRowAt,
+                submission::Column::UpperId
             ])
             .into_model::<VideoSourceDetail>()
             .all(&db),
@@ -155,6 +156,7 @@ pub async fn get_video_sources_details(
             rule: None,
             rule_display: None,
             use_dynamic_api: None,
+            upper_id: None,
             enabled: false,
             latest_row_at: None,
         })
