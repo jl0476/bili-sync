@@ -243,8 +243,8 @@ impl WebSocketHandler {
         let cancel_token = CancellationToken::new();
         tokio::spawn(
             async move {
-                let mut stream =
-                    WatchStream::new(UpperAutoManageTaskManager::get().subscribe()).map(ServerEvent::UpperAutoManageTasks);
+                let mut stream = WatchStream::new(UpperAutoManageTaskManager::get().subscribe())
+                    .map(ServerEvent::UpperAutoManageTasks);
                 while let Some(event) = stream.next().await {
                     if let Err(e) = tx.send(event).await {
                         error!("Failed to send upper auto manage task status: {:?}", e);

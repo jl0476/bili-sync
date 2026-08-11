@@ -285,7 +285,7 @@ mod tests {
     fn test_status_convert() {
         let testcases = [[0, 0, 1], [1, 2, 3], [3, 1, 2], [3, 0, 7]];
         for testcase in testcases.iter() {
-            let status = Status::<3, video::Column>::from(testcase.clone());
+            let status = Status::<3, video::Column>::from(*testcase);
             assert_eq!(<[u32; 3]>::from(status), *testcase);
         }
     }
@@ -294,7 +294,7 @@ mod tests {
     fn test_status_convert_and_update() {
         let testcases = [([0, 0, 1], [1, 7, 7]), ([3, 4, 3], [4, 4, 7]), ([3, 1, 7], [4, 7, 7])];
         for (before, after) in testcases.iter() {
-            let mut status = Status::<3, video::Column>::from(before.clone());
+            let mut status = Status::<3, video::Column>::from(*before);
             status.update_status(&[
                 ExecutionStatus::Failed(anyhow!("")),
                 ExecutionStatus::Succeeded,

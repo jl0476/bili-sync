@@ -26,19 +26,20 @@ import type {
 	UpdateVideoSourceResponse,
 	UpdateVideoStatusRequest,
 	UpdateVideoStatusResponse,
-	UppersResponse,
-	VideoResponse,
-	VideoSourcesDetailsResponse,
-	VideoSourcesResponse,
-	VideosRequest,
-	VideosResponse,
 	UpperAutoManageAction,
+	UpperAutoManageCandidate,
 	UpperAutoManageListResponse,
 	UpperAutoManagePolicy,
 	UpperAutoManageRun,
 	UpperAutoManageStatusResponse,
 	UpperManagePolicy,
-	UpsertUpperAutoManagePolicyRequest
+	UppersResponse,
+	UpsertUpperAutoManagePolicyRequest,
+	VideoResponse,
+	VideoSourcesDetailsResponse,
+	VideoSourcesResponse,
+	VideosRequest,
+	VideosResponse
 } from './types';
 import { wsManager } from './ws';
 
@@ -342,6 +343,10 @@ class ApiClient {
 		return this.get<UpperAutoManagePolicy[]>('/upper-auto-manage/policies', { policy });
 	}
 
+	async listUpperAutoManageCandidates(): Promise<ApiResponse<UpperAutoManageCandidate[]>> {
+		return this.get<UpperAutoManageCandidate[]>('/upper-auto-manage/candidates');
+	}
+
 	async upsertUpperAutoManagePolicy(
 		submissionId: number,
 		request: UpsertUpperAutoManagePolicyRequest
@@ -429,8 +434,11 @@ const api = {
 	}) => apiClient.listUpperAutoManageActions(params),
 	listUpperAutoManagePolicies: (policy?: UpperManagePolicy) =>
 		apiClient.listUpperAutoManagePolicies(policy),
-	upsertUpperAutoManagePolicy: (submissionId: number, request: UpsertUpperAutoManagePolicyRequest) =>
-		apiClient.upsertUpperAutoManagePolicy(submissionId, request),
+	listUpperAutoManageCandidates: () => apiClient.listUpperAutoManageCandidates(),
+	upsertUpperAutoManagePolicy: (
+		submissionId: number,
+		request: UpsertUpperAutoManagePolicyRequest
+	) => apiClient.upsertUpperAutoManagePolicy(submissionId, request),
 	deleteUpperAutoManagePolicy: (submissionId: number) =>
 		apiClient.deleteUpperAutoManagePolicy(submissionId),
 	generateQrcode: () => apiClient.generateQrcode(),

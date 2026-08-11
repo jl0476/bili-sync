@@ -47,7 +47,7 @@ impl VersionedConfig {
     pub async fn init_for_test(connection: &DatabaseConnection) -> Result<&'static VersionedConfig> {
         VERSIONED_CONFIG
             .get_or_try_init(|| async move {
-                let Some(Ok(config)) = Config::load_from_database(&connection).await? else {
+                let Some(Ok(config)) = Config::load_from_database(connection).await? else {
                     bail!("no config found in test database");
                 };
                 Ok(VersionedConfig::new(config))
@@ -67,7 +67,7 @@ impl VersionedConfig {
         use std::sync::LazyLock;
         static FALLBACK_CONFIG: LazyLock<VersionedConfig> = LazyLock::new(|| VersionedConfig::new(Config::default()));
         // 优先从全局变量获取，未初始化则退回默认配置
-        return VERSIONED_CONFIG.get().unwrap_or_else(|| &FALLBACK_CONFIG);
+        VERSIONED_CONFIG.get().unwrap_or_else(|| &FALLBACK_CONFIG)
     }
 
     fn new(config: Config) -> Self {

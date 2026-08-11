@@ -1,11 +1,15 @@
+use anyhow::Context;
 use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use bili_sync_entity::upper_auto_manage_policy::UpperManagePolicy;
+use bili_sync_entity::upper_auto_manage_policy::UpperManageSource;
 use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run};
-use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, Statement,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::api::error::InnerApiError;
@@ -18,16 +22,15 @@ pub(super) fn router() -> Router {
         .route("/upper-auto-manage/status", get(get_status))
         .route("/upper-auto-manage/run", post(trigger_run))
         .route("/upper-auto-manage/runs", get(list_runs))
-        .route(
-            "/upper-auto-manage/runs/{run_id}/actions",
-            get(list_run_actions),
-        )
+        .route("/upper-auto-manage/runs/{run_id}/actions", get(list_run_actions))
         .route("/upper-auto-manage/actions", get(list_actions))
         .route("/upper-auto-manage/policies", get(list_policies))
         .route(
             "/upper-auto-manage/policies/{submission_id}",
             put(upsert_policy).delete(delete_policy),
         )
+        // 未被白/黑名单保护的投稿源列表，供前端为「普通 UP」首次创建策略时挑选目标
+        .route("/upper-auto-manage/candidates", get(list_candidates))
 }
 
 #[derive(Serialize)]
@@ -112,6 +115,19 @@ pub struct PolicyDto {
     pub upper_id: i64,
     pub upper_name: String,
     pub enabled: bool,
+}
+
+/// 候选投稿源：所有尚未被白/黑名单保护的 submission
+/// 用于前端「为普通 UP 首次创建策略」的选择列表
+#[derive(Serialize, FromQueryResult)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateDto {
+    pub submission_id: i32,
+    pub upper_id: i64,
+    pub upper_name: String,
+    pub enabled: bool,
+    pub policy: Option<UpperManagePolicy>,
+    pub source: Option<UpperManageSource>,
 }
 
 #[derive(Serialize)]
@@ -276,41 +292,40 @@ async fn upsert_policy(
     Json(req): Json<UpsertPolicyRequest>,
 ) -> Result<ApiResponse<bool>, ApiError> {
     // 校验 submission 存在
-    let submission_exists = submission::Entity::find_by_id(submission_id)
-        .one(&db)
-        .await?
-        .is_some();
+    let submission_exists = submission::Entity::find_by_id(submission_id).one(&db).await?.is_some();
     if !submission_exists {
         return Err(InnerApiError::NotFound(submission_id).into());
     }
     let policy = parse_policy(&req.policy)?;
-    let txn = db.begin().await?;
-    let existing = upper_auto_manage_policy::Entity::find_by_id(submission_id)
-        .one(&txn)
-        .await?;
     let now = chrono::Utc::now().naive_utc();
+    // 显式 find + insert/update：ActiveModel::save() 在主键已 Set 时不一定走 insert 路径，
+    // 之前普通 UP（无 policy 行）调用本接口会更新 0 行失败。
+    // 改为「先查询，不存在则 insert，存在则 update」，确保两种情况都生效。
+    // 手动 API 一律写入 Manual 来源，避免 UI 把「由人设置」误标为自动处理。
+    let existing = upper_auto_manage_policy::Entity::find_by_id(submission_id)
+        .one(&db)
+        .await?;
     if existing.is_some() {
         upper_auto_manage_policy::ActiveModel {
             submission_id: Set(submission_id),
             policy: Set(policy),
+            source: Set(UpperManageSource::Manual),
             reason: Set(req.reason),
             updated_at: Set(now),
-            ..Default::default()
         }
-        .update(&txn)
+        .update(&db)
         .await?;
     } else {
         upper_auto_manage_policy::ActiveModel {
             submission_id: Set(submission_id),
             policy: Set(policy),
-            source: Set(UpperManageSource::Auto),
+            source: Set(UpperManageSource::Manual),
             reason: Set(req.reason),
             updated_at: Set(now),
         }
-        .insert(&txn)
+        .insert(&db)
         .await?;
     }
-    txn.commit().await?;
     Ok(ApiResponse::ok(true))
 }
 
@@ -318,10 +333,52 @@ async fn delete_policy(
     Path(submission_id): Path<i32>,
     Extension(db): Extension<DatabaseConnection>,
 ) -> Result<ApiResponse<bool>, ApiError> {
-    upper_auto_manage_policy::Entity::delete_by_id(submission_id)
-        .exec(&db)
+    // 校验 submission 存在
+    let submission_exists = submission::Entity::find_by_id(submission_id).one(&db).await?.is_some();
+    if !submission_exists {
+        return Err(InnerApiError::NotFound(submission_id).into());
+    }
+    // 先取出原策略，按其类型决定后续语义：
+    //   - blacklist → 改写为 normal+auto，允许自动恢复巡检重新启用
+    //   - whitelist/normal → 直接删除策略行
+    // 这样既能恢复「删除黑名单 → 重新启用」的体验，又不会破坏「手动禁用不自动恢复」的语义。
+    let existing = upper_auto_manage_policy::Entity::find_by_id(submission_id)
+        .one(&db)
         .await?;
+    match existing {
+        Some(p) => crate::task::reset_policy_after_delete(&db, submission_id, p.policy).await?,
+        None => {
+            // 没有策略行：直接当作成功（no-op）
+        }
+    }
     Ok(ApiResponse::ok(true))
+}
+
+/// 列出所有可作为「首次创建策略」目标的投稿源
+///
+/// 返回所有 submission，包括当前没有策略行的（policy/source 字段为 null）。
+/// 已存在白/黑名单策略的 UP 也返回，便于用户在同页修改或删除其策略。
+async fn list_candidates(
+    Extension(db): Extension<DatabaseConnection>,
+) -> Result<ApiResponse<Vec<CandidateDto>>, ApiError> {
+    let rows: Vec<CandidateDto> = CandidateDto::find_by_statement(Statement::from_string(
+        db.get_database_backend(),
+        "
+SELECT s.id AS submission_id,
+       s.upper_id AS upper_id,
+       s.upper_name AS upper_name,
+       s.enabled AS enabled,
+       p.policy AS policy,
+       p.source AS source
+FROM submission s
+LEFT JOIN upper_auto_manage_policy p ON p.submission_id = s.id
+ORDER BY s.upper_name ASC
+",
+    ))
+    .all(&db)
+    .await
+    .context("查询候选投稿源失败")?;
+    Ok(ApiResponse::ok(rows))
 }
 
 fn parse_policy(s: &str) -> Result<UpperManagePolicy, ApiError> {

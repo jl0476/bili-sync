@@ -18,6 +18,7 @@
 	import type {
 		ApiError,
 		UpperAutoManageAction,
+		UpperAutoManageCandidate,
 		UpperAutoManagePolicy,
 		UpperAutoManageRun,
 		UpperAutoManageStatusResponse,
@@ -52,6 +53,13 @@
 	let policies: UpperAutoManagePolicy[] = $state([]);
 	let policyFilter = $state<UpperManagePolicy | ''>('');
 
+	// 新建策略：候选投稿源 + 表单
+	let candidates: UpperAutoManageCandidate[] = $state([]);
+	let newPolicySubmissionId = $state<number | ''>('');
+	let newPolicyValue = $state<UpperManagePolicy>('whitelist');
+	let newPolicyReason = $state('');
+	let creatingPolicy = $state(false);
+
 	// 删除确认
 	let showDeleteDialog = $state(false);
 	let deleteTarget: UpperAutoManagePolicy | null = $state(null);
@@ -80,7 +88,9 @@
 		return { normal: '正常', whitelist: '白名单', blacklist: '黑名单' }[p];
 	}
 
-	function policyVariant(p: UpperManagePolicy): 'default' | 'destructive' | 'outline' | 'secondary' {
+	function policyVariant(
+		p: UpperManagePolicy
+	): 'default' | 'destructive' | 'outline' | 'secondary' {
 		return ({ normal: 'secondary', whitelist: 'default', blacklist: 'destructive' } as const)[p];
 	}
 
@@ -88,11 +98,17 @@
 		return { auto_disabled: '自动禁用', auto_enabled: '自动启用', marked_banned: '转黑名单' }[a];
 	}
 
-	function actionVariant(a: UpperManageActionType): 'default' | 'destructive' | 'outline' | 'secondary' {
-		return ({ auto_disabled: 'destructive', auto_enabled: 'default', marked_banned: 'secondary' } as const)[a];
+	function actionVariant(
+		a: UpperManageActionType
+	): 'default' | 'destructive' | 'outline' | 'secondary' {
+		return (
+			{ auto_disabled: 'destructive', auto_enabled: 'default', marked_banned: 'secondary' } as const
+		)[a];
 	}
 
-	function statusVariant(s: UpperManageRunStatus): 'default' | 'destructive' | 'outline' | 'secondary' {
+	function statusVariant(
+		s: UpperManageRunStatus
+	): 'default' | 'destructive' | 'outline' | 'secondary' {
 		return ({ running: 'secondary', succeeded: 'default', failed: 'destructive' } as const)[s];
 	}
 
@@ -145,6 +161,37 @@
 		}
 	}
 
+	async function loadCandidates() {
+		try {
+			const res = await api.listUpperAutoManageCandidates();
+			candidates = res.data;
+		} catch (e) {
+			toast.error('加载候选投稿源失败', { description: (e as ApiError).message });
+		}
+	}
+
+	async function createPolicy() {
+		if (newPolicySubmissionId === '') {
+			toast.error('请选择一个 UP 主');
+			return;
+		}
+		creatingPolicy = true;
+		try {
+			await api.upsertUpperAutoManagePolicy(newPolicySubmissionId, {
+				policy: newPolicyValue,
+				reason: newPolicyReason.trim() || undefined
+			});
+			toast.success('已创建策略');
+			newPolicySubmissionId = '';
+			newPolicyReason = '';
+			await Promise.all([loadPolicies(), loadCandidates()]);
+		} catch (e) {
+			toast.error('创建策略失败', { description: (e as ApiError).message });
+		} finally {
+			creatingPolicy = false;
+		}
+	}
+
 	async function triggerRun() {
 		triggering = true;
 		try {
@@ -177,7 +224,7 @@
 		try {
 			await api.upsertUpperAutoManagePolicy(submissionId, { policy });
 			toast.success('已更新策略');
-			await loadPolicies();
+			await Promise.all([loadPolicies(), loadCandidates()]);
 		} catch (e) {
 			toast.error('更新策略失败', { description: (e as ApiError).message });
 		}
@@ -190,7 +237,7 @@
 			toast.success('已删除策略，该 UP 恢复默认管理');
 			showDeleteDialog = false;
 			deleteTarget = null;
-			await loadPolicies();
+			await Promise.all([loadPolicies(), loadCandidates()]);
 		} catch (e) {
 			toast.error('删除失败', { description: (e as ApiError).message });
 		}
@@ -208,6 +255,7 @@
 		setBreadcrumb([{ label: 'UP 自动管理' }]);
 		loadStatus();
 		loadRuns(0);
+		loadCandidates();
 		const unsubscribe = api.subscribeToUpperAutoManageTasks((data) => {
 			taskStatus = data;
 		});
@@ -243,7 +291,7 @@
 						<span>{status.checkConcurrency}</span>
 					</div>
 				</div>
-				<p class="mt-3 text-xs text-muted-foreground">
+				<p class="text-muted-foreground mt-3 text-xs">
 					配置请在<a href="/settings" class="underline">设置页</a>的「UP 自动管理」区块修改。
 				</p>
 			{/if}
@@ -282,17 +330,17 @@
 			<!-- 最近一次统计 -->
 			{#if status?.lastRun}
 				<div class="mt-4 grid grid-cols-3 gap-2 text-center">
-					<div class="rounded bg-muted/40 p-2">
+					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold text-red-500">{status.lastRun.disabledCount}</div>
-						<div class="text-xs text-muted-foreground">禁用</div>
+						<div class="text-muted-foreground text-xs">禁用</div>
 					</div>
-					<div class="rounded bg-muted/40 p-2">
+					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold text-green-500">{status.lastRun.enabledCount}</div>
-						<div class="text-xs text-muted-foreground">启用</div>
+						<div class="text-muted-foreground text-xs">启用</div>
 					</div>
-					<div class="rounded bg-muted/40 p-2">
+					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold">{status.lastRun.bannedCount}</div>
-						<div class="text-xs text-muted-foreground">转黑名单</div>
+						<div class="text-muted-foreground text-xs">转黑名单</div>
 					</div>
 				</div>
 			{/if}
@@ -333,11 +381,16 @@
 								</Table.Cell>
 								<Table.Cell>{formatTime(run.startedAt)}</Table.Cell>
 								<Table.Cell>{formatTime(run.finishedAt)}</Table.Cell>
-								<Table.Cell><Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge></Table.Cell>
+								<Table.Cell
+									><Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge
+									></Table.Cell
+								>
 								<Table.Cell class="text-center">{run.disabledCount}</Table.Cell>
 								<Table.Cell class="text-center">{run.enabledCount}</Table.Cell>
 								<Table.Cell class="text-center">{run.bannedCount}</Table.Cell>
-								<Table.Cell class="max-w-md text-xs text-muted-foreground">{run.summary ?? run.errorMessage ?? '-'}</Table.Cell>
+								<Table.Cell class="text-muted-foreground max-w-md text-xs"
+									>{run.summary ?? run.errorMessage ?? '-'}</Table.Cell
+								>
 							</Table.Row>
 							<Table.Row>
 								<Table.Cell colspan={8} class="bg-muted/30">
@@ -345,14 +398,16 @@
 										<div class="space-y-1 py-2">
 											{#each runActionsCache[run.id] as act (act.id)}
 												<div class="flex items-center gap-2 text-xs">
-													<Badge variant={actionVariant(act.action)}>{actionLabel(act.action)}</Badge>
+													<Badge variant={actionVariant(act.action)}
+														>{actionLabel(act.action)}</Badge
+													>
 													<span class="font-medium">{act.upperName}</span>
 													<span class="text-muted-foreground">{act.reason ?? ''}</span>
 												</div>
 											{/each}
 										</div>
 									{:else}
-										<div class="py-2 text-xs text-muted-foreground">暂无操作明细</div>
+										<div class="text-muted-foreground py-2 text-xs">暂无操作明细</div>
 									{/if}
 								</Table.Cell>
 							</Table.Row>
@@ -363,16 +418,23 @@
 								</Table.Cell>
 								<Table.Cell>{formatTime(run.startedAt)}</Table.Cell>
 								<Table.Cell>{formatTime(run.finishedAt)}</Table.Cell>
-								<Table.Cell><Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge></Table.Cell>
+								<Table.Cell
+									><Badge variant={statusVariant(run.status)}>{statusLabel(run.status)}</Badge
+									></Table.Cell
+								>
 								<Table.Cell class="text-center">{run.disabledCount}</Table.Cell>
 								<Table.Cell class="text-center">{run.enabledCount}</Table.Cell>
 								<Table.Cell class="text-center">{run.bannedCount}</Table.Cell>
-								<Table.Cell class="max-w-md truncate text-xs text-muted-foreground">{run.summary ?? run.errorMessage ?? '-'}</Table.Cell>
+								<Table.Cell class="text-muted-foreground max-w-md truncate text-xs"
+									>{run.summary ?? run.errorMessage ?? '-'}</Table.Cell
+								>
 							</Table.Row>
 						{/if}
 					{:else}
 						<Table.Row>
-							<Table.Cell colspan={8} class="text-center text-muted-foreground">暂无任务记录</Table.Cell>
+							<Table.Cell colspan={8} class="text-center text-muted-foreground"
+								>暂无任务记录</Table.Cell
+							>
 						</Table.Row>
 					{/each}
 				</Table.Body>
@@ -389,10 +451,12 @@
 			<div class="mb-3 flex items-center gap-2">
 				<Label>操作类型</Label>
 				<select
-					class="h-9 rounded border bg-background px-2 text-sm"
+					class="bg-background h-9 rounded border px-2 text-sm"
 					value={actionFilter}
 					onchange={(e) => {
-						actionFilter = (e.currentTarget as HTMLSelectElement).value as UpperManageActionType | '';
+						actionFilter = (e.currentTarget as HTMLSelectElement).value as
+							| UpperManageActionType
+							| '';
 						onActionFilterChange();
 					}}
 				>
@@ -418,13 +482,18 @@
 					{#each actions as act (act.id)}
 						<Table.Row>
 							<Table.Cell class="whitespace-nowrap">{formatTime(act.createdAt)}</Table.Cell>
-							<Table.Cell><Badge variant={actionVariant(act.action)}>{actionLabel(act.action)}</Badge></Table.Cell>
+							<Table.Cell
+								><Badge variant={actionVariant(act.action)}>{actionLabel(act.action)}</Badge
+								></Table.Cell
+							>
 							<Table.Cell>{act.upperName}</Table.Cell>
-							<Table.Cell class="text-xs text-muted-foreground">{act.reason ?? '-'}</Table.Cell>
+							<Table.Cell class="text-muted-foreground text-xs">{act.reason ?? '-'}</Table.Cell>
 						</Table.Row>
 					{:else}
 						<Table.Row>
-							<Table.Cell colspan={4} class="text-center text-muted-foreground">暂无操作记录</Table.Cell>
+							<Table.Cell colspan={4} class="text-center text-muted-foreground"
+								>暂无操作记录</Table.Cell
+							>
 						</Table.Row>
 					{/each}
 				</Table.Body>
@@ -438,10 +507,57 @@
 
 		<!-- 白名单/黑名单 -->
 		<Tabs.Content value="policies" class="mt-4">
+			<!-- 新建策略：选择从未自动处理过的 UP 设为首条白/黑名单 -->
+			<div class="bg-muted/30 mb-4 rounded-lg border p-4">
+				<h3 class="mb-2 text-sm font-semibold">新建策略</h3>
+				<p class="text-muted-foreground mb-3 text-xs">
+					从未被自动处理过的 UP 不会出现在下方列表中，可在此处挑选并设为首条白/黑名单。
+				</p>
+				<div class="flex flex-wrap items-end gap-2">
+					<div class="min-w-[180px] flex-1">
+						<Label>UP 主</Label>
+						<select
+							class="bg-background h-9 w-full rounded border px-2 text-sm"
+							value={newPolicySubmissionId}
+							onchange={(e) => {
+								const v = (e.currentTarget as HTMLSelectElement).value;
+								newPolicySubmissionId = v === '' ? '' : Number(v);
+							}}
+						>
+							<option value="">请选择 UP 主</option>
+							{#each candidates.filter((c) => c.policy === null) as c (c.submissionId)}
+								<option value={c.submissionId}>{c.upperName}</option>
+							{/each}
+						</select>
+					</div>
+					<div>
+						<Label>策略</Label>
+						<select
+							class="bg-background h-9 rounded border px-2 text-sm"
+							value={newPolicyValue}
+							onchange={(e) => {
+								newPolicyValue = (e.currentTarget as HTMLSelectElement).value as UpperManagePolicy;
+							}}
+						>
+							<option value="whitelist">白名单</option>
+							<option value="blacklist">黑名单</option>
+							<option value="normal">正常</option>
+						</select>
+					</div>
+					<div class="min-w-[180px] flex-1">
+						<Label>原因（可选）</Label>
+						<Input bind:value={newPolicyReason} placeholder="例如：手动设为白名单" />
+					</div>
+					<Button onclick={createPolicy} disabled={creatingPolicy || newPolicySubmissionId === ''}>
+						{creatingPolicy ? '创建中…' : '创建策略'}
+					</Button>
+				</div>
+			</div>
+
 			<div class="mb-3 flex items-center gap-2">
 				<Label>策略筛选</Label>
 				<select
-					class="h-9 rounded border bg-background px-2 text-sm"
+					class="bg-background h-9 rounded border px-2 text-sm"
 					value={policyFilter}
 					onchange={(e) => {
 						policyFilter = (e.currentTarget as HTMLSelectElement).value as UpperManagePolicy | '';
@@ -456,7 +572,7 @@
 				<Button variant="outline" size="sm" onclick={loadPolicies}>
 					<RefreshCwIcon class="mr-1 size-4" />刷新
 				</Button>
-				<span class="text-xs text-muted-foreground">
+				<span class="text-muted-foreground text-xs">
 					说明：白名单 = 永不自动禁用；黑名单 = 永不自动启用
 				</span>
 			</div>
@@ -477,19 +593,27 @@
 						<Table.Row>
 							<Table.Cell>{p.upperName}</Table.Cell>
 							<Table.Cell>
-								<Badge variant={p.enabled ? 'default' : 'secondary'}>{p.enabled ? '启用' : '禁用'}</Badge>
+								<Badge variant={p.enabled ? 'default' : 'secondary'}
+									>{p.enabled ? '启用' : '禁用'}</Badge
+								>
 							</Table.Cell>
 							<Table.Cell>
 								<Badge variant={policyVariant(p.policy)}>{policyLabel(p.policy)}</Badge>
 							</Table.Cell>
-							<Table.Cell class="text-xs text-muted-foreground">{p.source === 'manual' ? '手动' : '自动'}</Table.Cell>
-							<Table.Cell class="text-xs text-muted-foreground">{p.reason ?? '-'}</Table.Cell>
-							<Table.Cell class="whitespace-nowrap text-xs">{formatTime(p.updatedAt)}</Table.Cell>
+							<Table.Cell class="text-muted-foreground text-xs"
+								>{p.source === 'manual' ? '手动' : '自动'}</Table.Cell
+							>
+							<Table.Cell class="text-muted-foreground text-xs">{p.reason ?? '-'}</Table.Cell>
+							<Table.Cell class="text-xs whitespace-nowrap">{formatTime(p.updatedAt)}</Table.Cell>
 							<Table.Cell class="text-center">
 								<select
-									class="h-8 rounded border bg-background px-1 text-xs"
+									class="bg-background h-8 rounded border px-1 text-xs"
 									value={p.policy}
-									onchange={(e) => changePolicy(p.submissionId, (e.currentTarget as HTMLSelectElement).value as UpperManagePolicy)}
+									onchange={(e) =>
+										changePolicy(
+											p.submissionId,
+											(e.currentTarget as HTMLSelectElement).value as UpperManagePolicy
+										)}
 								>
 									<option value="normal">正常</option>
 									<option value="whitelist">白名单</option>
@@ -511,7 +635,8 @@
 					{:else}
 						<Table.Row>
 							<Table.Cell colspan={7} class="text-center text-muted-foreground">
-								暂无策略记录。UP 主在巡检中被自动禁用/封禁后会在此显示，也可手动将 UP 设为白名单/黑名单。
+								暂无策略记录。UP 主在巡检中被自动禁用/封禁后会在此显示，也可手动将 UP
+								设为白名单/黑名单。
 							</Table.Cell>
 						</Table.Row>
 					{/each}
@@ -526,7 +651,8 @@
 		<AlertDialog.Header>
 			<AlertDialog.Title>删除策略</AlertDialog.Title>
 			<AlertDialog.Description>
-			确认删除「{deleteTarget?.upperName}」的自动管理策略？删除后该 UP 将恢复默认管理（正常参与自动启停）。
+				确认删除「{deleteTarget?.upperName}」的自动管理策略？删除后该 UP
+				将恢复默认管理（正常参与自动启停）。
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 		<AlertDialog.Footer>

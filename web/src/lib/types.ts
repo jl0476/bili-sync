@@ -395,6 +395,16 @@ export interface UpperAutoManagePolicy {
 	enabled: boolean;
 }
 
+/// 候选投稿源（用于为普通 UP 首次创建策略）
+export interface UpperAutoManageCandidate {
+	submissionId: number;
+	upperId: number;
+	upperName: string;
+	enabled: boolean;
+	policy: UpperManagePolicy | null;
+	source: UpperManageSource | null;
+}
+
 export interface UpperAutoManageStatusResponse {
 	enabled: boolean;
 	interval: Trigger;
