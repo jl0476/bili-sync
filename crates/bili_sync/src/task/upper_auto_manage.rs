@@ -786,7 +786,7 @@ mod tests {
     use sea_orm::Set;
 
     use super::*;
-    use crate::config::UpperAutoManageOption;
+    use crate::config::item::UpperAutoManageOption;
 
     /// 准备一个独立 SQLite 测试库并跑完迁移
     async fn setup_test_db() -> (async_tempfile::TempDir, DatabaseConnection) {
