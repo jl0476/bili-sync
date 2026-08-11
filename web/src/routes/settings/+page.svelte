@@ -27,6 +27,7 @@
 	let loading = false;
 
 	let intervalInput: string = '1200';
+	let upperAutoManageIntervalInput: string = '21600';
 
 	// Notifier 管理相关
 	let showNotifierDialog = false;
@@ -106,6 +107,12 @@
 			} else {
 				intervalInput = formData.interval;
 			}
+			// UP 自动管理巡检间隔
+			if (typeof formData.upper_auto_manage.interval === 'number') {
+				upperAutoManageIntervalInput = String(formData.upper_auto_manage.interval);
+			} else {
+				upperAutoManageIntervalInput = formData.upper_auto_manage.interval;
+			}
 		} catch (error) {
 			console.error('加载配置失败:', error);
 			toast.error('加载配置失败', {
@@ -153,6 +160,15 @@
 			formData.interval = trimmed;
 		}
 
+		// UP 自动管理巡检间隔
+		const upperTrimmed = upperAutoManageIntervalInput.trim();
+		const upperAsNumber = Number(upperTrimmed);
+		if (!isNaN(upperAsNumber) && upperTrimmed !== '') {
+			formData.upper_auto_manage.interval = upperAsNumber;
+		} else {
+			formData.upper_auto_manage.interval = upperTrimmed;
+		}
+
 		saving = true;
 		try {
 			let resp = await api.updateConfig(formData);
@@ -164,6 +180,11 @@
 				intervalInput = String(formData.interval);
 			} else {
 				intervalInput = formData.interval;
+			}
+			if (typeof formData.upper_auto_manage.interval === 'number') {
+				upperAutoManageIntervalInput = String(formData.upper_auto_manage.interval);
+			} else {
+				upperAutoManageIntervalInput = formData.upper_auto_manage.interval;
 			}
 
 			toast.success('配置已保存');
@@ -261,6 +282,7 @@
 					<Tabs.Trigger value="danmaku">弹幕渲染</Tabs.Trigger>
 					<Tabs.Trigger value="notifiers">通知设置</Tabs.Trigger>
 					<Tabs.Trigger value="advanced">高级设置</Tabs.Trigger>
+					<Tabs.Trigger value="upperAutoManage">UP 自动管理</Tabs.Trigger>
 				</Tabs.List>
 
 				<!-- 基本设置 -->
@@ -801,6 +823,47 @@
 								</p>
 							</div>
 						</div>
+					</div>
+				</Tabs.Content>
+				<Tabs.Content value="upperAutoManage" class="mt-6 space-y-6">
+					<div class="space-y-2">
+						<Label for="upper-auto-enabled">启用 UP 主自动启停</Label>
+						<div class="flex items-center gap-2">
+							<Switch id="upper-auto-enabled" bind:checked={formData.upper_auto_manage.enabled} />
+							<span class="text-xs text-muted-foreground">开启后定期巡检，自动禁用长期不更新的 UP 主，并低频检查恢复更新</span>
+						</div>
+					</div>
+					<div class="space-y-2">
+						<Label for="upper-auto-interval">巡检频率</Label>
+						<Input
+							id="upper-auto-interval"
+							type="text"
+							bind:value={upperAutoManageIntervalInput}
+							placeholder="21600 或 0 0 4 * * *"
+						/>
+						<p class="text-xs text-muted-foreground">
+							巡检任务执行频率，数字为间隔秒数（如 21600 = 6 小时），或 Cron 表达式（如 0 0 4 * * * 表示每天凌晨 4 点）
+						</p>
+					</div>
+					<div class="space-y-2">
+						<Label for="upper-auto-threshold">不更新阈值（天）</Label>
+						<Input
+							id="upper-auto-threshold"
+							type="number"
+							min="7"
+							bind:value={formData.upper_auto_manage.inactive_threshold_days}
+						/>
+						<p class="text-xs text-muted-foreground">UP 主超过该天数未更新投稿则自动禁用</p>
+					</div>
+					<div class="space-y-2">
+						<Label for="upper-auto-concurrency">巡检并发数</Label>
+						<Input
+							id="upper-auto-concurrency"
+							type="number"
+							min="1"
+							bind:value={formData.upper_auto_manage.check_concurrency}
+						/>
+						<p class="text-xs text-muted-foreground">同时主动检查多少个禁用态 UP 主</p>
 					</div>
 				</Tabs.Content>
 			</Tabs.Root>

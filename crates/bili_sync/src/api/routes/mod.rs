@@ -15,6 +15,7 @@ mod dashboard;
 mod login;
 mod me;
 mod task;
+mod upper_auto_manage;
 mod video_sources;
 mod videos;
 mod ws;
@@ -32,6 +33,7 @@ pub fn router() -> Router {
             .merge(dashboard::router())
             .merge(ws::router())
             .merge(task::router())
+            .merge(upper_auto_manage::router())
             .layer(middleware::from_fn(auth)),
     )
 }

@@ -8,6 +8,7 @@
 	import PaletteIcon from '@lucide/svelte/icons/palette';
 	import Settings2Icon from '@lucide/svelte/icons/settings-2';
 	import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+	import UserCogIcon from '@lucide/svelte/icons/user-cog';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 	import { mode, toggleMode } from 'mode-watcher';
@@ -52,6 +53,11 @@
 						title: '视频源',
 						icon: DatabaseIcon,
 						href: '/video-sources'
+					},
+					{
+						title: 'UP 自动管理',
+						icon: UserCogIcon,
+						href: '/upper-auto-manage'
 					}
 				]
 			},

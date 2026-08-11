@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use bilibili::BiliClient;
 use parking_lot::RwLock;
 use sea_orm::DatabaseConnection;
-use task::{http_server, video_downloader};
+use task::{http_server, upper_auto_manage, video_downloader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -49,6 +49,13 @@ async fn main() {
     spawn_task(
         "HTTP 服务",
         http_server(connection.clone(), bili_client.clone(), log_writer),
+        &tracker,
+        token.clone(),
+    );
+
+    spawn_task(
+        "UP 自动管理",
+        upper_auto_manage(connection.clone(), bili_client.clone()),
         &tracker,
         token.clone(),
     );

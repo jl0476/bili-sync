@@ -82,6 +82,30 @@ impl Default for Trigger {
     }
 }
 
+/// UP 主投稿自动启停管理的配置
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UpperAutoManageOption {
+    /// 总开关，默认关闭
+    pub enabled: bool,
+    /// 巡检任务执行频率，默认每 6 小时一次
+    pub interval: Trigger,
+    /// UP 主多少天未更新触发自动禁用，默认 90 天
+    pub inactive_threshold_days: i64,
+    /// 巡检并发数（同时主动检查多少个禁用态 UP 主），默认 3
+    pub check_concurrency: usize,
+}
+
+impl Default for UpperAutoManageOption {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: Trigger::Interval(6 * 3600),
+            inactive_threshold_days: 90,
+            check_concurrency: 3,
+        }
+    }
+}
+
 pub trait PathSafeTemplate {
     fn path_safe_register(&mut self, name: &'static str, template: impl Into<String>) -> Result<()>;
     fn path_safe_render(&self, name: &'static str, data: &serde_json::Value) -> Result<String>;

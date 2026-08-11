@@ -46,7 +46,7 @@ impl<'a> Submission<'a> {
         Ok(serde_json::from_value(res["data"]["card"].take())?)
     }
 
-    async fn get_videos(&self, page: i32) -> Result<Value> {
+    pub async fn get_videos(&self, page: i32) -> Result<Value> {
         self.client
             .request(
                 Method::GET,
