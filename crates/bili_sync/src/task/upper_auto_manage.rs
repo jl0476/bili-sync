@@ -784,6 +784,7 @@ mod tests {
     use bili_sync_migration::{Migrator, MigratorTrait};
     use chrono::Utc;
     use sea_orm::Set;
+
     use super::*;
     use crate::config::UpperAutoManageOption;
 
