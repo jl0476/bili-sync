@@ -7,5 +7,8 @@ pub mod config;
 pub mod favorite;
 pub mod page;
 pub mod submission;
+pub mod upper_auto_manage_action;
+pub mod upper_auto_manage_policy;
+pub mod upper_auto_manage_run;
 pub mod video;
 pub mod watch_later;

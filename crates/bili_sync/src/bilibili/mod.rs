@@ -256,7 +256,7 @@ mod tests {
                 sid: "4523".to_string(),
                 collection_type: CollectionType::Season,
             },
-            &credential,
+            credential,
         );
         let videos = collection
             .into_video_stream()
@@ -267,7 +267,7 @@ mod tests {
         assert!(videos.iter().all(|v| matches!(v, VideoInfo::Collection { .. })));
         assert!(videos.iter().rev().is_sorted_by_key(|v| v.release_datetime()));
         // 测试收藏夹
-        let favorite = FavoriteList::new(&bili_client, "3144336058".to_string(), &credential);
+        let favorite = FavoriteList::new(&bili_client, "3144336058".to_string(), credential);
         let videos = favorite
             .into_video_stream()
             .take(20)
@@ -277,7 +277,7 @@ mod tests {
         assert!(videos.iter().all(|v| matches!(v, VideoInfo::Favorite { .. })));
         assert!(videos.iter().rev().is_sorted_by_key(|v| v.release_datetime()));
         // 测试稍后再看
-        let watch_later = WatchLater::new(&bili_client, &credential);
+        let watch_later = WatchLater::new(&bili_client, credential);
         let videos = watch_later
             .into_video_stream()
             .take(20)
@@ -287,7 +287,7 @@ mod tests {
         assert!(videos.iter().all(|v| matches!(v, VideoInfo::WatchLater { .. })));
         assert!(videos.iter().rev().is_sorted_by_key(|v| v.release_datetime()));
         // 测试投稿
-        let submission = Submission::new(&bili_client, "956761".to_string(), &credential);
+        let submission = Submission::new(&bili_client, "956761".to_string(), credential);
         let videos = submission
             .into_video_stream()
             .take(20)
@@ -297,7 +297,7 @@ mod tests {
         assert!(videos.iter().all(|v| matches!(v, VideoInfo::Submission { .. })));
         assert!(videos.iter().rev().is_sorted_by_key(|v| v.release_datetime()));
         // 测试动态
-        let dynamic = Dynamic::new(&bili_client, "659898".to_string(), &credential);
+        let dynamic = Dynamic::new(&bili_client, "659898".to_string(), credential);
         let videos = dynamic
             .into_video_stream()
             .take(20)
@@ -321,7 +321,7 @@ mod tests {
             .into_mixin_key()
             .context("no mixin key")?;
         set_global_mixin_key(mixin_key);
-        let video = Video::new(&bili_client, "BV1gLfnY8E6D", &credential);
+        let video = Video::new(&bili_client, "BV1gLfnY8E6D", credential);
         let pages = video.get_pages().await?;
         println!("pages: {:?}", pages);
         let subtitles = video.get_subtitles(&pages[0]).await?;

@@ -31,10 +31,10 @@ pub struct DownloadTaskManager {
 
 #[derive(Serialize, Default, Clone, Copy, Debug)]
 pub struct TaskStatus {
-    is_running: bool,
-    last_run: Option<chrono::DateTime<chrono::Local>>,
-    last_finish: Option<chrono::DateTime<chrono::Local>>,
-    next_run: Option<chrono::DateTime<chrono::Local>>,
+    pub(crate) is_running: bool,
+    pub(crate) last_run: Option<chrono::DateTime<chrono::Local>>,
+    pub(crate) last_finish: Option<chrono::DateTime<chrono::Local>>,
+    pub(crate) next_run: Option<chrono::DateTime<chrono::Local>>,
 }
 
 struct TaskContext {

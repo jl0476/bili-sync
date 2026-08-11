@@ -14,7 +14,7 @@ use crate::config::default::{
     default_auth_token, default_bind_address, default_collection_path, default_favorite_path, default_submission_path,
     default_time_format,
 };
-use crate::config::item::{ConcurrentLimit, NFOTimeType, SkipOption, Trigger};
+use crate::config::item::{ConcurrentLimit, NFOTimeType, SkipOption, Trigger, UpperAutoManageOption};
 use crate::notifier::Notifier;
 use crate::utils::model::{load_db_config, save_db_config};
 
@@ -54,6 +54,8 @@ pub struct Config {
     pub cdn_sorting: bool,
     #[serde(default)]
     pub try_upower_anyway: bool,
+    #[serde(default)]
+    pub upper_auto_manage: UpperAutoManageOption,
     pub version: u64,
 }
 
@@ -107,6 +109,32 @@ impl Config {
                 }
             }
         };
+        if self.upper_auto_manage.enabled {
+            if self.upper_auto_manage.inactive_threshold_days < 7 {
+                errors.push("upper_auto_manage.inactive_threshold_days 不能小于 7 天");
+            }
+            if self.upper_auto_manage.check_concurrency == 0 {
+                errors.push("upper_auto_manage.check_concurrency 必须大于 0");
+            }
+            match &self.upper_auto_manage.interval {
+                Trigger::Interval(secs) => {
+                    if *secs < 600 {
+                        errors.push("upper_auto_manage.interval 间隔不能小于 600 秒");
+                    }
+                }
+                Trigger::Cron(cron) => {
+                    if CronParser::builder()
+                        .seconds(croner::parser::Seconds::Required)
+                        .dom_and_dow(true)
+                        .build()
+                        .parse(cron)
+                        .is_err()
+                    {
+                        errors.push("upper_auto_manage.interval 的 Cron 表达式无效，正确格式为“秒 分 时 日 月 周”");
+                    }
+                }
+            }
+        }
         if !errors.is_empty() {
             bail!(errors.into_iter().map(|e| format!("- {}", e)).join("\n"));
         }
@@ -137,6 +165,7 @@ impl Default for Config {
             time_format: default_time_format(),
             cdn_sorting: false,
             try_upower_anyway: false,
+            upper_auto_manage: UpperAutoManageOption::default(),
             version: 0,
         }
     }

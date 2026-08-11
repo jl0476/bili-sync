@@ -5,3 +5,7 @@ debug*
 node_modules
 docs/.vitepress/cache
 docs/.vitepress/dist
+
+# 本地环境变量（含本地路径/密钥，勿提交）
+local.env
+.env

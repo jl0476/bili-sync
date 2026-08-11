@@ -6,6 +6,7 @@ import type { SysInfo, TaskStatus } from './types';
 export enum EventType {
 	Logs = 'logs',
 	Tasks = 'tasks',
+	UpperAutoManageTasks = 'upperAutoManageTasks',
 	SysInfo = 'sysInfo'
 }
 
@@ -13,6 +14,7 @@ export enum EventType {
 interface ServerEvent {
 	logs?: string;
 	tasks?: TaskStatus;
+	upperAutoManageTasks?: TaskStatus;
 	sysInfo?: SysInfo;
 }
 
@@ -38,6 +40,7 @@ export class WebSocketManager {
 
 	private logsSubscribers: Set<LogsCallback> = new Set();
 	private tasksSubscribers: Set<TasksCallback> = new Set();
+	private upperAutoManageTasksSubscribers: Set<TasksCallback> = new Set();
 	private sysInfoSubscribers: Set<SysInfoCallback> = new Set();
 
 	private subscribedEvents: Set<EventType> = new Set();
@@ -109,6 +112,8 @@ export class WebSocketManager {
 				this.notifyLogsSubscribers(data.logs);
 			} else if (data.tasks !== undefined) {
 				this.notifyTasksSubscribers(data.tasks);
+			} else if (data.upperAutoManageTasks !== undefined) {
+				this.notifyUpperAutoManageTasksSubscribers(data.upperAutoManageTasks);
 			} else if (data.sysInfo !== undefined) {
 				this.notifySysInfoSubscribers(data.sysInfo);
 			}
@@ -223,6 +228,21 @@ export class WebSocketManager {
 		};
 	}
 
+	public subscribeToUpperAutoManageTasks(callback: TasksCallback): () => void {
+		this.upperAutoManageTasksSubscribers.add(callback);
+
+		if (this.upperAutoManageTasksSubscribers.size === 1) {
+			this.subscribe(EventType.UpperAutoManageTasks);
+		}
+
+		return () => {
+			this.upperAutoManageTasksSubscribers.delete(callback);
+			if (this.upperAutoManageTasksSubscribers.size === 0) {
+				this.unsubscribe(EventType.UpperAutoManageTasks);
+			}
+		};
+	}
+
 	private notifyLogsSubscribers(data: string): void {
 		this.logsSubscribers.forEach((callback) => {
 			try {
@@ -239,6 +259,16 @@ export class WebSocketManager {
 				callback(data);
 			} catch (error) {
 				console.error('Error in tasks subscriber callback:', error);
+			}
+		});
+	}
+
+	private notifyUpperAutoManageTasksSubscribers(data: TaskStatus): void {
+		this.upperAutoManageTasksSubscribers.forEach((callback) => {
+			try {
+				callback(data);
+			} catch (error) {
+				console.error('Error in upper auto manage tasks subscriber callback:', error);
 			}
 		});
 	}

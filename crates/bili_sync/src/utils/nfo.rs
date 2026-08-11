@@ -252,6 +252,60 @@ impl NFO<'_> {
     }
 }
 
+pub trait ToNFO<'a, T> {
+    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> T;
+}
+
+impl<'a> ToNFO<'a, Movie<'a>> for &'a video::Model {
+    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> Movie<'a> {
+        Movie {
+            name: &self.name,
+            intro: &self.intro,
+            bvid: &self.bvid,
+            uppers: self.uppers().collect(),
+            premiered: match nfo_time_type {
+                NFOTimeType::FavTime => self.favtime,
+                NFOTimeType::PubTime => self.pubtime,
+            },
+            tags: self.tags.as_ref().map(|tags| tags.clone().into()),
+        }
+    }
+}
+
+impl<'a> ToNFO<'a, TVShow<'a>> for &'a video::Model {
+    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> TVShow<'a> {
+        TVShow {
+            name: &self.name,
+            intro: &self.intro,
+            bvid: &self.bvid,
+            uppers: self.uppers().collect(),
+            premiered: match nfo_time_type {
+                NFOTimeType::FavTime => self.favtime,
+                NFOTimeType::PubTime => self.pubtime,
+            },
+            tags: self.tags.as_ref().map(|tags| tags.clone().into()),
+        }
+    }
+}
+
+impl<'a> ToNFO<'a, Upper> for (&video::Model, &EntityUpper<i64, &str>) {
+    fn to_nfo(&'a self, _nfo_time_type: NFOTimeType) -> Upper {
+        Upper {
+            upper_id: self.1.mid.to_string(),
+            pubtime: self.0.pubtime,
+        }
+    }
+}
+
+impl<'a> ToNFO<'a, Episode<'a>> for &'a page::Model {
+    fn to_nfo(&'a self, _nfo_time_type: NFOTimeType) -> Episode<'a> {
+        Episode {
+            name: &self.name,
+            pid: self.pid.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,7 +375,7 @@ mod tests {
 </tvshow>"#,
         );
         assert_eq!(
-            NFO::Upper(((&video, &video.uppers().next().unwrap())).to_nfo(NFOTimeType::FavTime))
+            NFO::Upper((&video, &video.uppers().next().unwrap()).to_nfo(NFOTimeType::FavTime))
                 .generate_nfo()
                 .await
                 .unwrap(),
@@ -354,59 +408,5 @@ mod tests {
     <episode>3</episode>
 </episodedetails>"#,
         );
-    }
-}
-
-pub trait ToNFO<'a, T> {
-    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> T;
-}
-
-impl<'a> ToNFO<'a, Movie<'a>> for &'a video::Model {
-    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> Movie<'a> {
-        Movie {
-            name: &self.name,
-            intro: &self.intro,
-            bvid: &self.bvid,
-            uppers: self.uppers().collect(),
-            premiered: match nfo_time_type {
-                NFOTimeType::FavTime => self.favtime,
-                NFOTimeType::PubTime => self.pubtime,
-            },
-            tags: self.tags.as_ref().map(|tags| tags.clone().into()),
-        }
-    }
-}
-
-impl<'a> ToNFO<'a, TVShow<'a>> for &'a video::Model {
-    fn to_nfo(&'a self, nfo_time_type: NFOTimeType) -> TVShow<'a> {
-        TVShow {
-            name: &self.name,
-            intro: &self.intro,
-            bvid: &self.bvid,
-            uppers: self.uppers().collect(),
-            premiered: match nfo_time_type {
-                NFOTimeType::FavTime => self.favtime,
-                NFOTimeType::PubTime => self.pubtime,
-            },
-            tags: self.tags.as_ref().map(|tags| tags.clone().into()),
-        }
-    }
-}
-
-impl<'a> ToNFO<'a, Upper> for (&video::Model, &EntityUpper<i64, &str>) {
-    fn to_nfo(&'a self, _nfo_time_type: NFOTimeType) -> Upper {
-        Upper {
-            upper_id: self.1.mid.to_string(),
-            pubtime: self.0.pubtime,
-        }
-    }
-}
-
-impl<'a> ToNFO<'a, Episode<'a>> for &'a page::Model {
-    fn to_nfo(&'a self, _nfo_time_type: NFOTimeType) -> Episode<'a> {
-        Episode {
-            name: &self.name,
-            pid: self.pid.to_string(),
-        }
     }
 }

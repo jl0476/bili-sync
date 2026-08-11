@@ -26,7 +26,15 @@ import type {
 	UpdateVideoSourceResponse,
 	UpdateVideoStatusRequest,
 	UpdateVideoStatusResponse,
+	UpperAutoManageAction,
+	UpperAutoManageCandidate,
+	UpperAutoManageListResponse,
+	UpperAutoManagePolicy,
+	UpperAutoManageRun,
+	UpperAutoManageStatusResponse,
+	UpperManagePolicy,
 	UppersResponse,
+	UpsertUpperAutoManagePolicyRequest,
 	VideoResponse,
 	VideoSourcesDetailsResponse,
 	VideoSourcesResponse,
@@ -287,6 +295,69 @@ class ApiClient {
 		return this.post<boolean>('/task/download');
 	}
 
+	async getUpperAutoManageStatus(): Promise<ApiResponse<UpperAutoManageStatusResponse>> {
+		return this.get<UpperAutoManageStatusResponse>('/upper-auto-manage/status');
+	}
+
+	async triggerUpperAutoManageRun(): Promise<ApiResponse<boolean>> {
+		return this.post<boolean>('/upper-auto-manage/run');
+	}
+
+	async listUpperAutoManageRuns(
+		page?: number,
+		pageSize?: number
+	): Promise<ApiResponse<UpperAutoManageListResponse<UpperAutoManageRun>>> {
+		return this.get<UpperAutoManageListResponse<UpperAutoManageRun>>('/upper-auto-manage/runs', {
+			page,
+			pageSize
+		});
+	}
+
+	async listUpperAutoManageRunActions(
+		runId: number,
+		page?: number,
+		pageSize?: number
+	): Promise<ApiResponse<UpperAutoManageListResponse<UpperAutoManageAction>>> {
+		return this.get<UpperAutoManageListResponse<UpperAutoManageAction>>(
+			`/upper-auto-manage/runs/${runId}/actions`,
+			{ page, pageSize }
+		);
+	}
+
+	async listUpperAutoManageActions(params?: {
+		runId?: number;
+		submissionId?: number;
+		action?: string;
+		page?: number;
+		pageSize?: number;
+	}): Promise<ApiResponse<UpperAutoManageListResponse<UpperAutoManageAction>>> {
+		return this.get<UpperAutoManageListResponse<UpperAutoManageAction>>(
+			'/upper-auto-manage/actions',
+			params as Record<string, unknown>
+		);
+	}
+
+	async listUpperAutoManagePolicies(
+		policy?: UpperManagePolicy
+	): Promise<ApiResponse<UpperAutoManagePolicy[]>> {
+		return this.get<UpperAutoManagePolicy[]>('/upper-auto-manage/policies', { policy });
+	}
+
+	async listUpperAutoManageCandidates(): Promise<ApiResponse<UpperAutoManageCandidate[]>> {
+		return this.get<UpperAutoManageCandidate[]>('/upper-auto-manage/candidates');
+	}
+
+	async upsertUpperAutoManagePolicy(
+		submissionId: number,
+		request: UpsertUpperAutoManagePolicyRequest
+	): Promise<ApiResponse<boolean>> {
+		return this.put<boolean>(`/upper-auto-manage/policies/${submissionId}`, request);
+	}
+
+	async deleteUpperAutoManagePolicy(submissionId: number): Promise<ApiResponse<boolean>> {
+		return this.request<boolean>(`/upper-auto-manage/policies/${submissionId}`, 'DELETE');
+	}
+
 	async generateQrcode(): Promise<ApiResponse<GenerateQrcodeResponse>> {
 		return this.post<GenerateQrcodeResponse>('/login/qrcode/generate');
 	}
@@ -303,6 +374,9 @@ class ApiClient {
 	}
 	subscribeToTasks(onMessage: (data: TaskStatus) => void) {
 		return wsManager.subscribeToTasks(onMessage);
+	}
+	subscribeToUpperAutoManageTasks(onMessage: (data: TaskStatus) => void) {
+		return wsManager.subscribeToUpperAutoManageTasks(onMessage);
 	}
 }
 
@@ -345,6 +419,28 @@ const api = {
 	updateConfig: (config: Config) => apiClient.updateConfig(config),
 	getDashboard: () => apiClient.getDashboard(),
 	triggerDownloadTask: () => apiClient.triggerDownloadTask(),
+	getUpperAutoManageStatus: () => apiClient.getUpperAutoManageStatus(),
+	triggerUpperAutoManageRun: () => apiClient.triggerUpperAutoManageRun(),
+	listUpperAutoManageRuns: (page?: number, pageSize?: number) =>
+		apiClient.listUpperAutoManageRuns(page, pageSize),
+	listUpperAutoManageRunActions: (runId: number, page?: number, pageSize?: number) =>
+		apiClient.listUpperAutoManageRunActions(runId, page, pageSize),
+	listUpperAutoManageActions: (params?: {
+		runId?: number;
+		submissionId?: number;
+		action?: string;
+		page?: number;
+		pageSize?: number;
+	}) => apiClient.listUpperAutoManageActions(params),
+	listUpperAutoManagePolicies: (policy?: UpperManagePolicy) =>
+		apiClient.listUpperAutoManagePolicies(policy),
+	listUpperAutoManageCandidates: () => apiClient.listUpperAutoManageCandidates(),
+	upsertUpperAutoManagePolicy: (
+		submissionId: number,
+		request: UpsertUpperAutoManagePolicyRequest
+	) => apiClient.upsertUpperAutoManagePolicy(submissionId, request),
+	deleteUpperAutoManagePolicy: (submissionId: number) =>
+		apiClient.deleteUpperAutoManagePolicy(submissionId),
 	generateQrcode: () => apiClient.generateQrcode(),
 	pollQrcode: (qrcodeKey: string) => apiClient.pollQrcode(qrcodeKey),
 	subscribeToSysInfo: (onMessage: (data: SysInfo) => void) =>
@@ -354,6 +450,9 @@ const api = {
 
 	subscribeToTasks: (onMessage: (data: TaskStatus) => void) =>
 		apiClient.subscribeToTasks(onMessage),
+
+	subscribeToUpperAutoManageTasks: (onMessage: (data: TaskStatus) => void) =>
+		apiClient.subscribeToUpperAutoManageTasks(onMessage),
 
 	setAuthToken: (token: string) => apiClient.setAuthToken(token),
 	getAuthToken: () => apiClient.getAuthToken(),

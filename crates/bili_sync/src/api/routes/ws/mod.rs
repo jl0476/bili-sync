@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::api::response::SysInfo;
-use crate::task::{DownloadTaskManager, TaskStatus};
+use crate::task::{DownloadTaskManager, TaskStatus, UpperAutoManageTaskManager};
 
 static WEBSOCKET_HANDLER: LazyLock<WebSocketHandler> = LazyLock::new(WebSocketHandler::new);
 
@@ -45,6 +45,7 @@ async fn websocket_handler(ws: WebSocketUpgrade, Extension(log_writer): Extensio
 enum EventType {
     Logs,
     Tasks,
+    UpperAutoManageTasks,
     SysInfo,
 }
 
@@ -60,6 +61,7 @@ enum ClientEvent {
 enum ServerEvent {
     Logs(String),
     Tasks(TaskStatus),
+    UpperAutoManageTasks(TaskStatus),
     SysInfo(SysInfo),
 }
 
@@ -104,7 +106,7 @@ impl WebSocketHandler {
         // 日志和任务状态的处理本身就是由 stream 驱动的，可以直接为每个 ws 连接维护独立的任务处理器
         // 系统信息是服务端轮询然后推送的，如果单独维护会导致每个连接都独立轮询系统信息，造成不必要的浪费
         // 因此采用了全局的订阅者管理，所有连接共享同一个系统信息轮询任务
-        let (mut log_cancel, mut task_cancel) = (None, None);
+        let (mut log_cancel, mut task_cancel, mut upper_cancel) = (None, None, None);
         while let Some(Ok(msg)) = receiver.next().await {
             let Message::Text(text) = msg else {
                 continue;
@@ -137,6 +139,16 @@ impl WebSocketHandler {
                         cancel.cancel();
                     }
                 }
+                ClientEvent::Subscribe(EventType::UpperAutoManageTasks) => {
+                    if upper_cancel.is_none() {
+                        upper_cancel = Some(self.new_upper_auto_manage_task_handler(tx.clone()));
+                    }
+                }
+                ClientEvent::Unsubscribe(EventType::UpperAutoManageTasks) => {
+                    if let Some(cancel) = upper_cancel.take() {
+                        cancel.cancel();
+                    }
+                }
                 ClientEvent::Subscribe(EventType::SysInfo) => {
                     self.add_sysinfo_subscriber(uuid, tx.clone());
                 }
@@ -150,6 +162,9 @@ impl WebSocketHandler {
             cancel.cancel();
         }
         if let Some(cancel) = task_cancel {
+            cancel.cancel();
+        }
+        if let Some(cancel) = upper_cancel {
             cancel.cancel();
         }
         self.remove_sysinfo_subscriber(uuid);
@@ -214,6 +229,25 @@ impl WebSocketHandler {
                 while let Some(event) = stream.next().await {
                     if let Err(e) = tx.send(event).await {
                         error!("Failed to send task status: {:?}", e);
+                        break;
+                    }
+                }
+            }
+            .with_cancellation_token_owned(cancel_token.clone()),
+        );
+        cancel_token
+    }
+
+    /// 创建 UP 主自动巡检任务状态推送任务，返回任务的取消令牌
+    fn new_upper_auto_manage_task_handler(&self, tx: mpsc::Sender<ServerEvent>) -> CancellationToken {
+        let cancel_token = CancellationToken::new();
+        tokio::spawn(
+            async move {
+                let mut stream = WatchStream::new(UpperAutoManageTaskManager::get().subscribe())
+                    .map(ServerEvent::UpperAutoManageTasks);
+                while let Some(event) = stream.next().await {
+                    if let Err(e) = tx.send(event).await {
+                        error!("Failed to send upper auto manage task status: {:?}", e);
                         break;
                     }
                 }

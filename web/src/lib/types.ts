@@ -344,7 +344,84 @@ export interface Config {
 	time_format: string;
 	cdn_sorting: boolean;
 	try_upower_anyway: boolean;
+	upper_auto_manage: UpperAutoManageOption;
 	version: number;
+}
+
+export interface UpperAutoManageOption {
+	enabled: boolean;
+	interval: Trigger;
+	inactive_threshold_days: number;
+	check_concurrency: number;
+}
+
+export type UpperManagePolicy = 'normal' | 'whitelist' | 'blacklist';
+export type UpperManageSource = 'manual' | 'auto';
+export type UpperManageActionType = 'auto_disabled' | 'auto_enabled' | 'marked_banned';
+export type UpperManageRunStatus = 'running' | 'succeeded' | 'failed';
+
+export interface UpperAutoManageRun {
+	id: number;
+	startedAt: string;
+	finishedAt: string | null;
+	status: UpperManageRunStatus;
+	checkedCount: number;
+	disabledCount: number;
+	enabledCount: number;
+	bannedCount: number;
+	skippedCount: number;
+	errorMessage: string | null;
+	summary: string | null;
+}
+
+export interface UpperAutoManageAction {
+	id: number;
+	runId: number;
+	submissionId: number;
+	upperName: string;
+	action: UpperManageActionType;
+	reason: string | null;
+	createdAt: string;
+}
+
+export interface UpperAutoManagePolicy {
+	submissionId: number;
+	policy: UpperManagePolicy;
+	source: UpperManageSource;
+	reason: string | null;
+	updatedAt: string;
+	upperId: number;
+	upperName: string;
+	enabled: boolean;
+}
+
+/// 候选投稿源（用于为普通 UP 首次创建策略）
+export interface UpperAutoManageCandidate {
+	submissionId: number;
+	upperId: number;
+	upperName: string;
+	enabled: boolean;
+	policy: UpperManagePolicy | null;
+	source: UpperManageSource | null;
+}
+
+export interface UpperAutoManageStatusResponse {
+	enabled: boolean;
+	interval: Trigger;
+	inactiveThresholdDays: number;
+	checkConcurrency: number;
+	taskStatus: TaskStatus;
+	lastRun: UpperAutoManageRun | null;
+}
+
+export interface UpperAutoManageListResponse<T> {
+	totalCount: number;
+	items: T[];
+}
+
+export interface UpsertUpperAutoManagePolicyRequest {
+	policy: UpperManagePolicy;
+	reason?: string;
 }
 
 export interface DayCountPair {
