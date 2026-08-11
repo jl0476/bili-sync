@@ -784,8 +784,8 @@ mod tests {
     use bili_sync_migration::{Migrator, MigratorTrait};
     use chrono::Utc;
     use sea_orm::Set;
-    use crate::config::UpperAutoManageOption;
     use super::*;
+    use crate::config::UpperAutoManageOption;
 
     /// 准备一个独立 SQLite 测试库并跑完迁移
     async fn setup_test_db() -> (async_tempfile::TempDir, DatabaseConnection) {

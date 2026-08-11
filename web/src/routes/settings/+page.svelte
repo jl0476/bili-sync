@@ -830,7 +830,9 @@
 						<Label for="upper-auto-enabled">启用 UP 主自动启停</Label>
 						<div class="flex items-center gap-2">
 							<Switch id="upper-auto-enabled" bind:checked={formData.upper_auto_manage.enabled} />
-							<span class="text-xs text-muted-foreground">开启后定期巡检，自动禁用长期不更新的 UP 主，并低频检查恢复更新</span>
+							<span class="text-muted-foreground text-xs"
+								>开启后定期巡检，自动禁用长期不更新的 UP 主，并低频检查恢复更新</span
+							>
 						</div>
 					</div>
 					<div class="space-y-2">
@@ -841,8 +843,9 @@
 							bind:value={upperAutoManageIntervalInput}
 							placeholder="21600 或 0 0 4 * * *"
 						/>
-						<p class="text-xs text-muted-foreground">
-							巡检任务执行频率，数字为间隔秒数（如 21600 = 6 小时），或 Cron 表达式（如 0 0 4 * * * 表示每天凌晨 4 点）
+						<p class="text-muted-foreground text-xs">
+							巡检任务执行频率，数字为间隔秒数（如 21600 = 6 小时），或 Cron 表达式（如 0 0 4 * * *
+							表示每天凌晨 4 点）
 						</p>
 					</div>
 					<div class="space-y-2">
@@ -853,7 +856,7 @@
 							min="7"
 							bind:value={formData.upper_auto_manage.inactive_threshold_days}
 						/>
-						<p class="text-xs text-muted-foreground">UP 主超过该天数未更新投稿则自动禁用</p>
+						<p class="text-muted-foreground text-xs">UP 主超过该天数未更新投稿则自动禁用</p>
 					</div>
 					<div class="space-y-2">
 						<Label for="upper-auto-concurrency">巡检并发数</Label>
@@ -863,7 +866,7 @@
 							min="1"
 							bind:value={formData.upper_auto_manage.check_concurrency}
 						/>
-						<p class="text-xs text-muted-foreground">同时主动检查多少个禁用态 UP 主</p>
+						<p class="text-muted-foreground text-xs">同时主动检查多少个禁用态 UP 主</p>
 					</div>
 				</Tabs.Content>
 			</Tabs.Root>
