@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bili_sync_entity::upper_auto_manage_action::ActionType;
-use bili_sync_entity::upper_auto_manage_policy::UpperManagePolicy;
-use bili_sync_entity::upper_auto_manage_policy::UpperManageSource;
+use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
 use bili_sync_entity::upper_auto_manage_run::RunStatus;
 use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run};
 use futures::stream::{self, TryStreamExt};
@@ -781,12 +780,12 @@ pub async fn is_submission_enabled(connection: &DatabaseConnection, submission_i
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::UpperAutoManageOption;
     use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy as Policy, UpperManageSource as Source};
     use bili_sync_migration::{Migrator, MigratorTrait};
     use chrono::Utc;
     use sea_orm::Set;
+    use crate::config::UpperAutoManageOption;
+    use super::*;
 
     /// 准备一个独立 SQLite 测试库并跑完迁移
     async fn setup_test_db() -> (async_tempfile::TempDir, DatabaseConnection) {
