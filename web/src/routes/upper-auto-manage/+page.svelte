@@ -85,13 +85,20 @@
 	}
 
 	function policyLabel(p: UpperManagePolicy): string {
-		return { normal: '正常', whitelist: '白名单', blacklist: '黑名单' }[p];
+		return { normal: '正常', whitelist: '白名单', blacklist: '黑名单', banned: '封禁观察' }[p];
 	}
 
 	function policyVariant(
 		p: UpperManagePolicy
 	): 'default' | 'destructive' | 'outline' | 'secondary' {
-		return ({ normal: 'secondary', whitelist: 'default', blacklist: 'destructive' } as const)[p];
+		return (
+			{
+				normal: 'secondary',
+				whitelist: 'default',
+				blacklist: 'destructive',
+				banned: 'outline'
+			} as const
+		)[p];
 	}
 
 	function actionLabel(a: UpperManageActionType): string {
@@ -329,7 +336,7 @@
 			{/if}
 			<!-- 最近一次统计 -->
 			{#if status?.lastRun}
-				<div class="mt-4 grid grid-cols-3 gap-2 text-center">
+				<div class="mt-4 grid grid-cols-4 gap-2 text-center">
 					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold text-red-500">{status.lastRun.disabledCount}</div>
 						<div class="text-muted-foreground text-xs">禁用</div>
@@ -341,6 +348,12 @@
 					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold">{status.lastRun.bannedCount}</div>
 						<div class="text-muted-foreground text-xs">转黑名单</div>
+					</div>
+					<div class="bg-muted/40 rounded p-2">
+						<div class="text-xl font-bold text-amber-500">
+							{status.lastRun.bannedObservationCount}
+						</div>
+						<div class="text-muted-foreground text-xs">封禁观察</div>
 					</div>
 				</div>
 			{/if}
@@ -455,7 +468,8 @@
 					value={actionFilter}
 					onchange={(e) => {
 						actionFilter = (e.currentTarget as HTMLSelectElement).value as
-							UpperManageActionType | '';
+							| UpperManageActionType
+							| '';
 						onActionFilterChange();
 					}}
 				>
@@ -540,6 +554,7 @@
 						>
 							<option value="whitelist">白名单</option>
 							<option value="blacklist">黑名单</option>
+							<option value="banned">封禁观察</option>
 							<option value="normal">正常</option>
 						</select>
 					</div>
@@ -566,13 +581,15 @@
 					<option value="">全部</option>
 					<option value="whitelist">白名单</option>
 					<option value="blacklist">黑名单</option>
+					<option value="banned">封禁观察</option>
 					<option value="normal">正常</option>
 				</select>
 				<Button variant="outline" size="sm" onclick={loadPolicies}>
 					<RefreshCwIcon class="mr-1 size-4" />刷新
 				</Button>
 				<span class="text-muted-foreground text-xs">
-					说明：白名单 = 永不自动禁用；黑名单 = 永不自动启用
+					白名单 = 永不自动禁用 ｜ 黑名单 = 永不自动启用（删号/不可恢复） ｜ 封禁观察 = UP
+					疑似封禁/冻结，待人工判断是否转黑名单
 				</span>
 			</div>
 			<Table.Root>
@@ -617,6 +634,7 @@
 									<option value="normal">正常</option>
 									<option value="whitelist">白名单</option>
 									<option value="blacklist">黑名单</option>
+									<option value="banned">封禁观察</option>
 								</select>
 								<Button
 									variant="ghost"
@@ -634,8 +652,9 @@
 					{:else}
 						<Table.Row>
 							<Table.Cell colspan={7} class="text-center text-muted-foreground">
-								暂无策略记录。UP 主在巡检中被自动禁用/封禁后会在此显示，也可手动将 UP
-								设为白名单/黑名单。
+								暂无策略记录。UP
+								主在巡检中被自动禁用、删号转黑名单、或识别为封禁/冻结进入观察后会在此显示，也可手动将
+								UP 设为白名单/黑名单。
 							</Table.Cell>
 						</Table.Row>
 					{/each}
@@ -650,8 +669,13 @@
 		<AlertDialog.Header>
 			<AlertDialog.Title>删除策略</AlertDialog.Title>
 			<AlertDialog.Description>
-				确认删除「{deleteTarget?.upperName}」的自动管理策略？删除后该 UP
-				将恢复默认管理（正常参与自动启停）。
+				确认删除「{deleteTarget?.upperName}」的「{deleteTarget && policyLabel(deleteTarget.policy)}
+				」策略？
+				{#if deleteTarget?.policy === 'banned'}
+					清除封禁观察后，该 UP 将重新由巡检系统评估是否恢复/禁用。
+				{:else}
+					删除后该 UP 将恢复默认管理（正常参与自动启停）。
+				{/if}
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 		<AlertDialog.Footer>

@@ -54,6 +54,7 @@ pub struct RunDto {
     pub disabled_count: i32,
     pub enabled_count: i32,
     pub banned_count: i32,
+    pub banned_observation_count: i32,
     pub skipped_count: i32,
     pub error_message: Option<String>,
     pub summary: Option<String>,
@@ -70,6 +71,7 @@ impl From<upper_auto_manage_run::Model> for RunDto {
             disabled_count: m.disabled_count,
             enabled_count: m.enabled_count,
             banned_count: m.banned_count,
+            banned_observation_count: m.banned_observation_count,
             skipped_count: m.skipped_count,
             error_message: m.error_message,
             summary: m.summary,
@@ -188,8 +190,8 @@ async fn get_status(
 }
 
 async fn trigger_run() -> Result<ApiResponse<bool>, ApiError> {
-    UpperAutoManageTaskManager::get().run_once().await?;
-    Ok(ApiResponse::ok(true))
+    let queued = UpperAutoManageTaskManager::get().run_once().await?;
+    Ok(ApiResponse::ok(queued))
 }
 
 async fn list_runs(
@@ -297,6 +299,9 @@ async fn upsert_policy(
     }
     let policy = parse_policy(&req.policy)?;
     let now = chrono::Utc::now().naive_utc();
+    // 通过 per-submission 锁与巡检/启停串行，避免并发覆盖
+    let lock = crate::task::lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
     // 显式 find + insert/update：ActiveModel::save() 在主键已 Set 时不一定走 insert 路径，
     // 之前普通 UP（无 policy 行）调用本接口会更新 0 行失败。
     // 改为「先查询，不存在则 insert，存在则 update」，确保两种情况都生效。
@@ -337,10 +342,12 @@ async fn delete_policy(
     if !submission_exists {
         return Err(InnerApiError::NotFound(submission_id).into());
     }
+    // 通过 per-submission 锁串行：「读旧策略 → reset」必须原子，避免巡检并发覆盖
+    let lock = crate::task::lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
     // 先取出原策略，按其类型决定后续语义：
-    //   - blacklist → 改写为 normal+auto，允许自动恢复巡检重新启用
+    //   - blacklist/banned → 改写为 normal+auto，允许自动恢复巡检重新启用
     //   - whitelist/normal → 直接删除策略行
-    // 这样既能恢复「删除黑名单 → 重新启用」的体验，又不会破坏「手动禁用不自动恢复」的语义。
     let existing = upper_auto_manage_policy::Entity::find_by_id(submission_id)
         .one(&db)
         .await?;
@@ -385,6 +392,7 @@ fn parse_policy(s: &str) -> Result<UpperManagePolicy, ApiError> {
         "normal" => Ok(UpperManagePolicy::Normal),
         "whitelist" => Ok(UpperManagePolicy::Whitelist),
         "blacklist" => Ok(UpperManagePolicy::Blacklist),
+        "banned" => Ok(UpperManagePolicy::Banned),
         _ => Err(InnerApiError::BadRequest(format!("invalid policy: {s}")).into()),
     }
 }

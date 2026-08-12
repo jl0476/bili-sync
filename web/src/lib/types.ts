@@ -355,7 +355,7 @@ export interface UpperAutoManageOption {
 	check_concurrency: number;
 }
 
-export type UpperManagePolicy = 'normal' | 'whitelist' | 'blacklist';
+export type UpperManagePolicy = 'normal' | 'whitelist' | 'blacklist' | 'banned';
 export type UpperManageSource = 'manual' | 'auto';
 export type UpperManageActionType = 'auto_disabled' | 'auto_enabled' | 'marked_banned';
 export type UpperManageRunStatus = 'running' | 'succeeded' | 'failed';
@@ -369,6 +369,7 @@ export interface UpperAutoManageRun {
 	disabledCount: number;
 	enabledCount: number;
 	bannedCount: number;
+	bannedObservationCount: number;
 	skippedCount: number;
 	errorMessage: string | null;
 	summary: string | null;

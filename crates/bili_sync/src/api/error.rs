@@ -6,4 +6,6 @@ pub enum InnerApiError {
     NotFound(i32),
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("{0}")]
+    PolicyProtected(String),
 }

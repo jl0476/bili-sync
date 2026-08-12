@@ -204,6 +204,12 @@ pub async fn update_video_source(
     Extension(db): Extension<DatabaseConnection>,
     ValidatedJson(request): ValidatedJson<UpdateVideoSourceRequest>,
 ) -> Result<ApiResponse<UpdateVideoSourceResponse>, ApiError> {
+    // submissions 类型有策略联动 + 高级策略保护，走专门的事务化路径（在提取 filter_option 前拦截，
+    // 避免 request 部分移动）
+    if source_type.as_str() == "submissions" {
+        let rule_display = request.rule.as_ref().map(|rule| rule.to_string());
+        return update_submission_source(&db, id, request, rule_display).await;
+    }
     let rule_display = request.rule.as_ref().map(|rule| rule.to_string());
     let filter_option = request.filter_option.map(serde_json::to_value).transpose()?;
     let active_model = match source_type.as_str() {
@@ -222,17 +228,6 @@ pub async fn update_video_source(
             active_model.rule = Set(request.rule);
             active_model.filter_option = Set(filter_option);
             _ActiveModel::Favorite(active_model)
-        }),
-        "submissions" => submission::Entity::find_by_id(id).one(&db).await?.map(|model| {
-            let mut active_model: submission::ActiveModel = model.into();
-            active_model.path = Set(request.path);
-            active_model.enabled = Set(request.enabled);
-            active_model.rule = Set(request.rule);
-            active_model.filter_option = Set(filter_option);
-            if let Some(use_dynamic_api) = request.use_dynamic_api {
-                active_model.use_dynamic_api = Set(use_dynamic_api);
-            }
-            _ActiveModel::Submission(active_model)
         }),
         "watch_later" => match watch_later::Entity::find_by_id(id).one(&db).await? {
             // 稍后再看需要做特殊处理，get 时如果稍后再看不存在返回的是 id 为 1 的假记录
@@ -267,6 +262,101 @@ pub async fn update_video_source(
         return Err(InnerApiError::NotFound(id).into());
     };
     active_model.save(&db).await?;
+    Ok(ApiResponse::ok(UpdateVideoSourceResponse { rule_display }))
+}
+
+/// 更新 submission 视频来源，含 UP 自动管理策略联动：
+///
+/// - 高级策略（Whitelist/Blacklist/Banned）保护：若 request.enabled 与当前不同，
+///   返回 409 拒绝，要求用户先在 UP 自动管理页面调整策略。
+/// - 普通可恢复态（无 policy 行，或 policy=Normal 任意 source）：
+///   * 启用→禁用：同事务写 Normal+Auto，使其进入恢复巡检候选。
+///   * 禁用→启用：删除 Normal+Auto 行，避免恢复巡检继续跟踪。
+/// - enabled 不变：仅更新其他字段，不动策略。
+///
+/// 全程在 lock_for_submission + 单事务内完成，保证读旧→决策→写原子。
+async fn update_submission_source(
+    db: &DatabaseConnection,
+    id: i32,
+    request: UpdateVideoSourceRequest,
+    rule_display: Option<String>,
+) -> Result<ApiResponse<UpdateVideoSourceResponse>, ApiError> {
+    use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
+    use bili_sync_entity::{submission, upper_auto_manage_policy};
+
+    let filter_option = request.filter_option.map(serde_json::to_value).transpose()?;
+    let lock = crate::task::lock_for_submission(id);
+    let _guard = lock.lock().await;
+
+    let txn = db.begin().await?;
+    // 事务内重读最新 submission 与 policy 行
+    let prior = submission::Entity::find_by_id(id).one(&txn).await?;
+    let Some(prior_model) = prior else {
+        return Err(InnerApiError::NotFound(id).into());
+    };
+    let prior_enabled = prior_model.enabled;
+    let prior_policy = upper_auto_manage_policy::Entity::find_by_id(id).one(&txn).await?;
+    let prior_policy_value = prior_policy.as_ref().map(|p| p.policy);
+
+    // 高级策略保护：Whitelist/Blacklist/Banned 下禁止切换 enabled
+    let enabled_change = request.enabled != prior_enabled;
+    if enabled_change
+        && matches!(
+            prior_policy_value,
+            Some(UpperManagePolicy::Whitelist) | Some(UpperManagePolicy::Blacklist) | Some(UpperManagePolicy::Banned)
+        )
+    {
+        let label = match prior_policy_value {
+            Some(UpperManagePolicy::Whitelist) => "白名单",
+            Some(UpperManagePolicy::Blacklist) => "黑名单",
+            Some(UpperManagePolicy::Banned) => "封禁观察",
+            _ => unreachable!(),
+        };
+        return Err(InnerApiError::PolicyProtected(format!(
+            "该 UP 受「{}」保护，请先在 UP 自动管理页面调整策略",
+            label
+        ))
+        .into());
+    }
+
+    // 更新 submission（path/rule/filter_option/use_dynamic_api/enabled）
+    let mut active_model: submission::ActiveModel = prior_model.into();
+    active_model.path = Set(request.path);
+    active_model.enabled = Set(request.enabled);
+    active_model.rule = Set(request.rule);
+    active_model.filter_option = Set(filter_option);
+    if let Some(use_dynamic_api) = request.use_dynamic_api {
+        active_model.use_dynamic_api = Set(use_dynamic_api);
+    }
+    active_model.save(&txn).await?;
+
+    // 策略联动：仅普通可恢复态（None 或 Normal 任意 source）在 enabled 变化时联动
+    let is_normal_like = matches!(prior_policy_value, None | Some(UpperManagePolicy::Normal));
+    if is_normal_like && enabled_change {
+        let now = chrono::Utc::now().naive_utc();
+        if prior_enabled && !request.enabled {
+            // 启用→禁用：写 Normal+Auto（覆盖 source），使其进入恢复巡检候选
+            let am = upper_auto_manage_policy::ActiveModel {
+                submission_id: Set(id),
+                policy: Set(UpperManagePolicy::Normal),
+                source: Set(UpperManageSource::Auto),
+                reason: Set(Some("用户手动禁用".to_string())),
+                updated_at: Set(now),
+            };
+            if prior_policy.is_some() {
+                am.update(&txn).await?;
+            } else {
+                am.insert(&txn).await?;
+            }
+        } else if !prior_enabled && request.enabled {
+            // 禁用→启用：删除 Normal+Auto 行（若存在），避免恢复巡检继续跟踪
+            if prior_policy.is_some() {
+                upper_auto_manage_policy::Entity::delete_by_id(id).exec(&txn).await?;
+            }
+        }
+    }
+
+    txn.commit().await?;
     Ok(ApiResponse::ok(UpdateVideoSourceResponse { rule_display }))
 }
 
