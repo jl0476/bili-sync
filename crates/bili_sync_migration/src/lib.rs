@@ -13,6 +13,8 @@ mod m20251009_123713_add_use_dynamic_api;
 mod m20260324_055217_add_staff;
 mod m20260712_123205_add_filter_option;
 mod m20260811_000001_upper_auto_manage;
+mod m20260812_000001_add_banned_observation_count;
+mod m20260812_000002_add_video_query_indexes;
 
 pub struct Migrator;
 
@@ -33,6 +35,23 @@ impl MigratorTrait for Migrator {
             Box::new(m20260324_055217_add_staff::Migration),
             Box::new(m20260712_123205_add_filter_option::Migration),
             Box::new(m20260811_000001_upper_auto_manage::Migration),
+            Box::new(m20260812_000001_add_banned_observation_count::Migration),
+            Box::new(m20260812_000002_add_video_query_indexes::Migration),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_video_source_query_indexes_migration() {
+        let migrations = Migrator::migrations();
+        assert!(
+            migrations
+                .iter()
+                .any(|migration| migration.name() == "m20260812_000002_add_video_query_indexes")
+        );
     }
 }

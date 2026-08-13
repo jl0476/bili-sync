@@ -28,6 +28,10 @@ pub enum UpperManagePolicy {
     /// 禁用后永不自动重新启用
     #[sea_orm(string_value = "blacklist")]
     Blacklist,
+    /// 封禁观察：UP 疑似被封禁/冻结（短期/永封无法区分），不进黑名单、不进恢复候选，
+    /// 由用户人工判断是否转黑名单。删除该策略行后会重新纳入默认巡检。
+    #[sea_orm(string_value = "banned")]
+    Banned,
 }
 
 /// 标记当前 submission 的 enabled 状态由谁设定

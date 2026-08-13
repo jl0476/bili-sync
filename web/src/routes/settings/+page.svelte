@@ -14,6 +14,7 @@
 	import FilterOptionEditor from '$lib/components/filter-option-editor.svelte';
 	import NotifierDialog from './NotifierDialog.svelte';
 	import InfoIcon from '@lucide/svelte/icons/info';
+	import PlayIcon from '@lucide/svelte/icons/play';
 	import QrCodeIcon from '@lucide/svelte/icons/qr-code';
 	import api from '$lib/api';
 	import { toast } from 'svelte-sonner';
@@ -28,6 +29,27 @@
 
 	let intervalInput: string = '1200';
 	let upperAutoManageIntervalInput: string = '21600';
+	let manualTriggering = false;
+
+	// 立即触发一次 UP 自动巡检（与 /upper-auto-manage 页面各自独立，不共享状态）
+	async function triggerManualRun() {
+		if (manualTriggering) return;
+		manualTriggering = true;
+		try {
+			const res = await api.triggerUpperAutoManageRun();
+			if (!res.data) {
+				toast.warning('已有巡检任务进行中');
+			} else {
+				toast.success('已触发巡检');
+			}
+		} catch (error) {
+			toast.error('触发失败', {
+				description: (error as ApiError).message
+			});
+		} finally {
+			manualTriggering = false;
+		}
+	}
 
 	// Notifier 管理相关
 	let showNotifierDialog = false;
@@ -275,7 +297,7 @@
 	{:else if formData}
 		<div class="space-y-6">
 			<Tabs.Root value="basic" class="w-full">
-				<Tabs.List class="grid w-full grid-cols-6">
+				<Tabs.List class="grid w-full grid-cols-7">
 					<Tabs.Trigger value="basic">基本设置</Tabs.Trigger>
 					<Tabs.Trigger value="auth">B站认证</Tabs.Trigger>
 					<Tabs.Trigger value="filter">视频处理</Tabs.Trigger>
@@ -867,6 +889,43 @@
 							bind:value={formData.upper_auto_manage.check_concurrency}
 						/>
 						<p class="text-muted-foreground text-xs">同时主动检查多少个禁用态 UP 主</p>
+					</div>
+
+					<Separator />
+
+					<!-- 说明：三种策略语义 + 手动恢复机制 -->
+					<div
+						class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200"
+					>
+						<p class="font-medium">巡检行为说明</p>
+						<ul
+							class="text-muted-foreground mt-1 list-inside list-disc space-y-0.5 text-xs dark:text-blue-300/80"
+						>
+							<li>手动禁用的 UP 在检测到新投稿时会自动重新启用</li>
+							<li>长期不更新的 UP 超过阈值后自动禁用</li>
+							<li>删号/注销的 UP 自动加入黑名单（永不自动恢复）</li>
+							<li>封禁/冻结的 UP 进入「封禁观察」状态（不自动启用、不进黑名单，待人工判断）</li>
+							<li>
+								白名单/黑名单/封禁观察状态下的 UP 受策略保护，需在<a
+									href="/upper-auto-manage"
+									class="underline">UP 自动管理页面</a
+								>调整
+							</li>
+						</ul>
+					</div>
+
+					<!-- 立即执行巡检 -->
+					<div class="flex items-center justify-between rounded-lg border p-4">
+						<div class="space-y-1">
+							<Label>手动触发巡检</Label>
+							<p class="text-muted-foreground text-xs">
+								立刻执行一次 UP 主自动启停巡检，无需等待定时器
+							</p>
+						</div>
+						<Button onclick={triggerManualRun} disabled={manualTriggering}>
+							<PlayIcon class="mr-2 h-4 w-4" />
+							{manualTriggering ? '触发中...' : '立即执行巡检'}
+						</Button>
 					</div>
 				</Tabs.Content>
 			</Tabs.Root>

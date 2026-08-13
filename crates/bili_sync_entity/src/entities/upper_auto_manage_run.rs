@@ -15,6 +15,7 @@ pub struct Model {
     pub disabled_count: i32,
     pub enabled_count: i32,
     pub banned_count: i32,
+    pub banned_observation_count: i32,
     pub skipped_count: i32,
     pub error_message: Option<String>,
     pub summary: Option<String>,

@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -7,11 +7,12 @@ use bili_sync_entity::upper_auto_manage_action::ActionType;
 use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
 use bili_sync_entity::upper_auto_manage_run::RunStatus;
 use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run};
+use dashmap::DashMap;
 use futures::stream::{self, TryStreamExt};
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm::{DatabaseConnection, FromQueryResult, Statement, TransactionTrait};
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::{Mutex, OnceCell, watch};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::bilibili::{self, BiliClient, BiliError, Credential, Submission};
@@ -20,6 +21,20 @@ use crate::task::TaskStatus;
 use crate::utils::notify::error_and_notify;
 
 static INSTANCE: OnceCell<UpperAutoManageTaskManager> = OnceCell::const_new();
+
+/// 全局 per-submission 锁池：所有按 submission_id 写 policy / enabled 的入口
+/// （update_video_source、upsert_policy、delete_policy、巡检阶段一/二）都通过它串行化，
+/// 避免 API 与后台巡检并发覆盖。不同 submission 互不阻塞。
+static SUBMISSION_LOCKS: OnceLock<DashMap<i32, Arc<Mutex<()>>>> = OnceLock::new();
+
+/// 获取某个 submission 的串行锁。首次访问时惰性创建。
+/// 返回的 `Arc<Mutex<()>>` 由调用方 `.lock().await` 持有，作用域结束自动释放。
+pub fn lock_for_submission(submission_id: i32) -> Arc<Mutex<()>> {
+    let map = SUBMISSION_LOCKS.get_or_init(DashMap::new);
+    map.entry(submission_id)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// 启动 UP 主投稿自动启停管理任务
 pub async fn upper_auto_manage(connection: DatabaseConnection, bili_client: Arc<BiliClient>) -> Result<()> {
@@ -36,10 +51,13 @@ pub struct UpperAutoManageTaskManager {
 struct TaskContext {
     connection: DatabaseConnection,
     bili_client: Arc<BiliClient>,
-    running: tokio::sync::Mutex<()>,
+    /// 巡检任务排队/执行状态：false=空闲，true=已占用。
+    /// 占用发生在 run_once/定时闭包入口，释放在 execute_inspection 的 finally，
+    /// 覆盖"排队→执行→完成"全窗口，防止手动连点排入多个 one-shot 任务。
+    run_slot: Mutex<bool>,
     status_tx: watch::Sender<TaskStatus>,
     status_rx: watch::Receiver<TaskStatus>,
-    job_id: tokio::sync::Mutex<Option<uuid::Uuid>>,
+    job_id: Mutex<Option<uuid::Uuid>>,
 }
 
 impl UpperAutoManageTaskManager {
@@ -63,17 +81,38 @@ impl UpperAutoManageTaskManager {
         self.cx.status_rx.clone()
     }
 
-    /// 手动触发一次巡检任务
-    pub async fn run_once(&self) -> Result<()> {
-        self.sched
+    /// 手动触发一次巡检任务。
+    ///
+    /// 返回 `Ok(true)` 表示已成功排队，`Ok(false)` 表示已有巡检排队/执行中（防重）。
+    /// slot 占用发生在此处入口，释放在 `execute_inspection` 的 finally（覆盖排队→执行→完成全窗口）。
+    pub async fn run_once(&self) -> Result<bool> {
+        // 占用 slot：与定时触发互斥
+        {
+            let mut slot = self.cx.run_slot.lock().await;
+            if *slot {
+                return Ok(false);
+            }
+            *slot = true;
+        }
+        let cx = self.cx.clone();
+        let register_result = self
+            .sched
             .lock()
             .await
-            .add(Job::new_one_shot_async(
-                Duration::from_secs(0),
-                run_inspection_task(self.cx.clone()),
-            )?)
-            .await?;
-        Ok(())
+            .add(Job::new_one_shot_async(Duration::from_secs(0), move |uuid, l| {
+                let cx = cx.clone();
+                Box::pin(async move {
+                    cx.execute_inspection(uuid, l).await;
+                })
+            })?)
+            .await;
+        if let Err(e) = register_result {
+            // 登记失败必须立即释放 slot，并把错误返回 API（不吞错误）
+            let mut slot = self.cx.run_slot.lock().await;
+            *slot = false;
+            return Err(e.into());
+        }
+        Ok(true)
     }
 
     /// 启动任务调度器
@@ -99,10 +138,10 @@ impl UpperAutoManageTaskManager {
         let cx = Arc::new(TaskContext {
             connection,
             bili_client,
-            running: tokio::sync::Mutex::new(()),
+            run_slot: Mutex::new(false),
             status_tx,
             status_rx,
-            job_id: tokio::sync::Mutex::new(None),
+            job_id: Mutex::new(None),
         });
         let mut rx = VersionedConfig::get().subscribe();
         let initial_config = rx.borrow_and_update().clone();
@@ -199,49 +238,73 @@ async fn schedule_refresh_next_run(
 fn run_inspection_task(
     cx: Arc<TaskContext>,
 ) -> impl FnMut(uuid::Uuid, JobScheduler) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    move |uuid, mut l| {
+    move |uuid, l| {
         let cx = cx.clone();
         Box::pin(async move {
-            let Ok(_lock) = cx.running.try_lock() else {
-                warn!("上一轮 UP 主自动巡检任务尚未结束，跳过本次执行..");
-                return;
+            // 占用 slot：与手动触发互斥。定时任务在 slot 已占用时跳过本次触发。
+            let already_taken = {
+                let mut slot = cx.run_slot.lock().await;
+                if *slot {
+                    true
+                } else {
+                    *slot = true;
+                    false
+                }
             };
-            let _ = cx.status_tx.send(TaskStatus {
-                is_running: true,
-                last_run: Some(chrono::Local::now()),
-                last_finish: None,
-                next_run: None,
-            });
-            info!("开始执行本轮 UP 主自动巡检任务..");
-            let config = VersionedConfig::get().snapshot();
-            match run_inspection(&cx.connection, &cx.bili_client, &config).await {
-                Ok(stats) => info!(
-                    "本轮 UP 主自动巡检任务执行完毕：检查 {}，禁用 {}，启用 {}，封禁 {}，跳过 {}",
-                    stats.checked, stats.disabled, stats.enabled, stats.banned, stats.skipped
-                ),
-                Err(e) => error_and_notify(
-                    &config,
-                    &cx.bili_client,
-                    format!("本轮 UP 主自动巡检任务执行遇到错误：{:#}", e),
-                    &e,
-                ),
+            if already_taken {
+                warn!("已有 UP 主自动巡检任务排队/执行中，跳过本次定时触发");
+                return;
             }
-            // 从 job_id 取真实 uuid（当前可能是 oneshot 任务），刷新 next_run
-            let task_uuid = (*cx.job_id.lock().await).unwrap_or(uuid);
-            let next_run = l
-                .next_tick_for_job(task_uuid)
-                .await
-                .ok()
-                .flatten()
-                .map(|dt| dt.with_timezone(&chrono::Local));
-            let last_status = *cx.status_rx.borrow();
-            let _ = cx.status_tx.send(TaskStatus {
-                is_running: false,
-                last_run: last_status.last_run,
-                last_finish: Some(chrono::Local::now()),
-                next_run,
-            });
+            cx.execute_inspection(uuid, l).await;
         })
+    }
+}
+
+impl TaskContext {
+    /// 共享执行：假定调用方已占用 run_slot。执行巡检、更新状态、finally 释放 slot。
+    /// 由定时任务闭包与手动 one-shot 闭包共同调用，保证状态收尾（is_running /
+    /// last_run / last_finish / next_run / 错误通知 / slot 释放）逻辑一致。
+    async fn execute_inspection(self: &Arc<Self>, job_uuid: uuid::Uuid, mut sched: JobScheduler) {
+        let _ = self.status_tx.send(TaskStatus {
+            is_running: true,
+            last_run: Some(chrono::Local::now()),
+            last_finish: None,
+            next_run: None,
+        });
+        info!("开始执行本轮 UP 主自动巡检任务..");
+        let config = VersionedConfig::get().snapshot();
+        match run_inspection(&self.connection, &self.bili_client, &config).await {
+            Ok(stats) => info!(
+                "本轮 UP 主自动巡检任务执行完毕：检查 {}，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}",
+                stats.checked, stats.disabled, stats.enabled, stats.banned, stats.banned_observation, stats.skipped
+            ),
+            Err(e) => error_and_notify(
+                &config,
+                &self.bili_client,
+                format!("本轮 UP 主自动巡检任务执行遇到错误：{:#}", e),
+                &e,
+            ),
+        }
+        // 从 job_id 取定时任务的 uuid（当前可能是 oneshot 任务），刷新 next_run；
+        // 手动 one-shot 也走此路径，通过 cx.job_id 查询定时任务的 next tick，
+        // 不会把 next_run 清成 None，避免手动脉冲后 UI 暂时显示"无下次巡检"。
+        let task_uuid = (*self.job_id.lock().await).unwrap_or(job_uuid);
+        let next_run = sched
+            .next_tick_for_job(task_uuid)
+            .await
+            .ok()
+            .flatten()
+            .map(|dt| dt.with_timezone(&chrono::Local));
+        let last_status = *self.status_rx.borrow();
+        let _ = self.status_tx.send(TaskStatus {
+            is_running: false,
+            last_run: last_status.last_run,
+            last_finish: Some(chrono::Local::now()),
+            next_run,
+        });
+        // finally：无论成功失败都释放 slot
+        let mut slot = self.run_slot.lock().await;
+        *slot = false;
     }
 }
 
@@ -251,6 +314,7 @@ struct RunStats {
     disabled: i32,
     enabled: i32,
     banned: i32,
+    banned_observation: i32,
     skipped: i32,
 }
 
@@ -283,14 +347,15 @@ async fn run_inspection(
             RunStatus::Succeeded,
             None,
             Some(format!(
-                "巡检完成：检查 {} 个 UP，禁用 {}，启用 {}，封禁转黑名单 {}，跳过 {}",
-                stats.checked, stats.disabled, stats.enabled, stats.banned, stats.skipped
+                "巡检完成：检查 {} 个 UP，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}",
+                stats.checked, stats.disabled, stats.enabled, stats.banned, stats.banned_observation, stats.skipped
             )),
             RunStats {
                 checked: stats.checked,
                 disabled: stats.disabled,
                 enabled: stats.enabled,
                 banned: stats.banned,
+                banned_observation: stats.banned_observation,
                 skipped: stats.skipped,
             },
         ),
@@ -304,6 +369,7 @@ async fn run_inspection(
         disabled_count: Set(stats.disabled),
         enabled_count: Set(stats.enabled),
         banned_count: Set(stats.banned),
+        banned_observation_count: Set(stats.banned_observation),
         skipped_count: Set(stats.skipped),
         error_message: Set(error_message),
         summary: Set(summary.clone()),
@@ -431,25 +497,48 @@ async fn run_inspection_inner(
                             stats_arc.lock().await.skipped += 1;
                             let _ = cand;
                         }
-                        CheckOutcomeKind::Banned(msg) => {
+                        CheckOutcomeKind::Gone(msg) => {
+                            // 删号/注销/不存在 → 永久不可恢复，写 Blacklist
                             upsert_policy(
                                 connection,
                                 submission_id,
                                 UpperManagePolicy::Blacklist,
                                 UpperManageSource::Auto,
-                                Some(format!("UP 不可用：{}", msg)),
+                                Some(format!("UP 已删号/不可恢复：{}", msg)),
                             )
                             .await?;
                             stats_arc.lock().await.banned += 1;
                             warn!(
-                                "UP「{}」({}) 检测到不可用，已转黑名单：{}",
+                                "UP「{}」({}) 检测到已删号/不可恢复，已转黑名单：{}",
                                 upper_name, submission_id, msg
                             );
                             pending_actions_arc.lock().await.push(PendingAction {
                                 submission_id,
                                 upper_name,
                                 action: ActionType::MarkedBanned,
-                                reason: format!("UP 不可用：{}", msg),
+                                reason: format!("UP 已删号/不可恢复：{}", msg),
+                            });
+                        }
+                        CheckOutcomeKind::BannedObservation(msg) => {
+                            // 封禁/冻结（短期/永封无法区分）→ 写 Banned 观察，不进黑名单、不动 enabled
+                            upsert_policy(
+                                connection,
+                                submission_id,
+                                UpperManagePolicy::Banned,
+                                UpperManageSource::Auto,
+                                Some(format!("封禁观察，待人工判断：{}", msg)),
+                            )
+                            .await?;
+                            stats_arc.lock().await.banned_observation += 1;
+                            warn!(
+                                "UP「{}」({}) 检测到封禁/冻结，已置为封禁观察：{}",
+                                upper_name, submission_id, msg
+                            );
+                            pending_actions_arc.lock().await.push(PendingAction {
+                                submission_id,
+                                upper_name,
+                                action: ActionType::MarkedBanned,
+                                reason: format!("封禁观察：{}", msg),
                             });
                         }
                     }
@@ -462,6 +551,7 @@ async fn run_inspection_inner(
             let inner_stats = stats_arc.lock().await;
             stats.enabled += inner_stats.enabled;
             stats.banned += inner_stats.banned;
+            stats.banned_observation += inner_stats.banned_observation;
             stats.skipped += inner_stats.skipped;
         }
         pending_actions.extend(pending_actions_arc.lock().await.drain(..));
@@ -519,7 +609,7 @@ struct SubmissionActivity {
     last_pubtime: Option<DateTime>,
 }
 
-/// 查询启用态、且未被列入白名单/黑名单的 submission 及其最新投稿时间
+/// 查询启用态、且未被列入白名单/黑名单/封禁观察的 submission 及其最新投稿时间
 async fn fetch_inactive_candidates(connection: &DatabaseConnection) -> Result<Vec<SubmissionActivity>> {
     let sql = "
 SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
@@ -528,7 +618,7 @@ LEFT JOIN video v ON v.submission_id = s.id
 WHERE s.enabled = 1
   AND NOT EXISTS (
     SELECT 1 FROM upper_auto_manage_policy p
-    WHERE p.submission_id = s.id AND p.policy IN ('whitelist', 'blacklist')
+    WHERE p.submission_id = s.id AND p.policy IN ('whitelist', 'blacklist', 'banned')
   )
 GROUP BY s.id, s.upper_id, s.upper_name";
     let candidates =
@@ -571,10 +661,13 @@ struct CheckOutcome {
 enum CheckOutcomeKind {
     Recovered(DateTime),
     StillInactive,
-    Banned(String),
+    /// UP 已永久不可恢复（注销/不存在）→ 阶段二写入 Blacklist
+    Gone(String),
+    /// UP 被封禁/冻结（短期/永封无法区分）→ 阶段二写入 Banned 观察，保持 enabled=false
+    BannedObservation(String),
 }
 
-/// 主动拉取禁用态 UP 的最新投稿，判定恢复 / 仍不活跃 / 不可用
+/// 主动拉取禁用态 UP 的最新投稿，判定恢复 / 仍不活跃 / 永久不可用 / 封禁观察
 async fn check_disabled_upper(
     client: &BiliClient,
     credential: &Credential,
@@ -592,12 +685,36 @@ async fn check_disabled_upper(
                     upper_name: cand.upper_name.clone(),
                 });
             }
-            let latest_pubdate = vlist[0]["pubdate"]
-                .as_i64()
-                .with_context(|| format!("解析 UP {} 投稿 pubdate 失败", cand.upper_id))?;
-            let latest_pubtime = chrono::DateTime::from_timestamp(latest_pubdate, 0)
-                .map(|dt| dt.naive_utc())
-                .context("invalid pubdate timestamp")?;
+            let latest_pubdate = match vlist[0]["pubdate"].as_i64() {
+                Some(ts) => ts,
+                None => {
+                    // 数据异常（字段缺失/类型错误）只影响这一个 UP，不应中断整轮巡检。
+                    // 按「仍不活跃」处理：下一轮再试；同时打印原始片段便于诊断。
+                    warn!(
+                        "解析 UP「{}」({}) 最新投稿 pubdate 失败，按不活跃处理；raw[0]={}",
+                        cand.upper_name, cand.upper_id, vlist[0]
+                    );
+                    return Ok(CheckOutcome {
+                        kind: CheckOutcomeKind::StillInactive,
+                        submission_id: cand.submission_id,
+                        upper_name: cand.upper_name.clone(),
+                    });
+                }
+            };
+            let latest_pubtime = match chrono::DateTime::from_timestamp(latest_pubdate, 0) {
+                Some(dt) => dt.naive_utc(),
+                None => {
+                    warn!(
+                        "UP「{}」({}) pubdate={} 超出合法时间戳范围，按不活跃处理",
+                        cand.upper_name, cand.upper_id, latest_pubdate
+                    );
+                    return Ok(CheckOutcome {
+                        kind: CheckOutcomeKind::StillInactive,
+                        submission_id: cand.submission_id,
+                        upper_name: cand.upper_name.clone(),
+                    });
+                }
+            };
             let recovered = match cand.last_pubtime {
                 Some(known) => latest_pubtime > known,
                 None => true,
@@ -618,9 +735,18 @@ async fn check_disabled_upper(
                 if bili_err.is_risk_control_related() {
                     bail!(e);
                 }
-                if bili_err.is_upper_unavailable() {
+                // 删号/注销/不存在 → 永久不可恢复，后续写 Blacklist
+                if bili_err.is_upper_permanently_gone() {
                     return Ok(CheckOutcome {
-                        kind: CheckOutcomeKind::Banned(bili_err.to_string()),
+                        kind: CheckOutcomeKind::Gone(bili_err.to_string()),
+                        submission_id: cand.submission_id,
+                        upper_name: cand.upper_name.clone(),
+                    });
+                }
+                // 封禁/冻结 → 观察态，后续写 Banned（不进黑名单，不动 enabled）
+                if bili_err.is_upper_banned() {
+                    return Ok(CheckOutcome {
+                        kind: CheckOutcomeKind::BannedObservation(bili_err.to_string()),
                         submission_id: cand.submission_id,
                         upper_name: cand.upper_name.clone(),
                     });
@@ -634,6 +760,7 @@ async fn check_disabled_upper(
 
 /// 在同一事务内更新 submission.enabled 与对应 policy，避免出现
 /// 「enabled 已被禁用但 policy 未写入成功」导致 UP 永久卡在禁用态的孤立状态。
+/// 通过 lock_for_submission 与 API 写入串行，避免并发覆盖。
 async fn disable_submission_with_policy(
     connection: &DatabaseConnection,
     submission_id: i32,
@@ -641,6 +768,8 @@ async fn disable_submission_with_policy(
     source: UpperManageSource,
     reason: Option<String>,
 ) -> Result<()> {
+    let lock = lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
     let txn = connection.begin().await?;
     submission::ActiveModel {
         id: Set(submission_id),
@@ -662,6 +791,8 @@ async fn enable_submission_with_policy(
     source: UpperManageSource,
     reason: Option<String>,
 ) -> Result<()> {
+    let lock = lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
     let txn = connection.begin().await?;
     submission::ActiveModel {
         id: Set(submission_id),
@@ -675,7 +806,8 @@ async fn enable_submission_with_policy(
     Ok(())
 }
 
-/// 写入或更新某 submission 的 policy（独立事务）
+/// 写入或更新某 submission 的 policy（独立事务）。
+/// 通过 lock_for_submission 与 API 写入串行，避免并发覆盖。
 async fn upsert_policy(
     connection: &DatabaseConnection,
     submission_id: i32,
@@ -683,6 +815,8 @@ async fn upsert_policy(
     source: UpperManageSource,
     reason: Option<String>,
 ) -> Result<()> {
+    let lock = lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
     let txn = connection.begin().await?;
     upsert_policy_txn(&txn, submission_id, policy, source, reason).await?;
     txn.commit().await?;
@@ -718,8 +852,9 @@ async fn upsert_policy_txn(
 
 /// 删除用户已有的策略行，根据原策略决定后续语义：
 ///
-/// - `Blacklist`：改写为 `normal+auto` 并保留当前 enabled 状态。这样恢复巡检（限定 source=auto）
-///   能命中该 UP 并在检测到新投稿时自动重新启用，符合用户「删除黑名单 = 允许自动恢复」的预期。
+/// - `Blacklist` / `Banned`：改写为 `normal+auto` 并保留当前 enabled 状态。这样恢复巡检
+///   （限定 source=auto）能命中该 UP 并在检测到新投稿时自动重新启用，符合用户
+///   「删除黑名单/清除封禁观察 = 允许自动恢复」的预期。
 /// - `Whitelist` / `Normal`：直接删除行。删除白名单后该 UP 重新进入自动禁用巡检候选；
 ///   删除 normal 策略后该 UP 不再保留任何策略标记，完全交由系统/用户手动管理。
 ///
@@ -730,6 +865,8 @@ pub async fn reset_policy_after_delete(
     submission_id: i32,
     original_policy: UpperManagePolicy,
 ) -> Result<()> {
+    // 锁由调用方（API handler / update_video_source）在外层持有，这里不再加锁，
+    // 避免 tokio Mutex 不可重入导致死锁。
     match original_policy {
         UpperManagePolicy::Blacklist => {
             let txn = connection.begin().await?;
@@ -739,6 +876,18 @@ pub async fn reset_policy_after_delete(
                 UpperManagePolicy::Normal,
                 UpperManageSource::Auto,
                 Some("用户删除黑名单，允许自动恢复".to_string()),
+            )
+            .await?;
+            txn.commit().await?;
+        }
+        UpperManagePolicy::Banned => {
+            let txn = connection.begin().await?;
+            upsert_policy_txn(
+                &txn,
+                submission_id,
+                UpperManagePolicy::Normal,
+                UpperManageSource::Auto,
+                Some("用户清除封禁观察，允许自动恢复".to_string()),
             )
             .await?;
             txn.commit().await?;
@@ -903,6 +1052,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reset_policy_after_delete_rewrites_banned_to_normal_auto() {
+        // 删除「封禁观察」策略：应改写为 normal+auto，允许恢复巡检重新评估
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 10201, "banned_up", false).await;
+        upsert_policy(&conn, sid, Policy::Banned, Source::Auto, Some("封禁观察".to_string()))
+            .await
+            .expect("seed banned");
+        reset_policy_after_delete(&conn, sid, Policy::Banned)
+            .await
+            .expect("reset banned");
+        let p = load_policy(&conn, sid).await.expect("policy 行必须存在");
+        assert_eq!(p.policy, Policy::Normal);
+        assert_eq!(p.source, Source::Auto, "清除封禁观察后应为 normal+auto 以允许自动恢复");
+        assert!(
+            !is_submission_enabled(&conn, sid).await.unwrap(),
+            "enabled 状态应被保留"
+        );
+    }
+
+    #[tokio::test]
     async fn reset_policy_after_delete_removes_whitelist_row() {
         let (_dir, conn) = setup_test_db().await;
         let sid = insert_submission(&conn, 1021, "white", true).await;
@@ -999,16 +1168,37 @@ mod tests {
         let (_dir, conn) = setup_test_db().await;
         let sid_w = insert_submission(&conn, 106, "white", false).await;
         let sid_b = insert_submission(&conn, 107, "black", false).await;
+        let sid_banned = insert_submission(&conn, 1088, "banned", false).await;
         upsert_policy(&conn, sid_w, Policy::Whitelist, Source::Manual, None)
             .await
             .unwrap();
         upsert_policy(&conn, sid_b, Policy::Blacklist, Source::Manual, None)
             .await
             .unwrap();
+        upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
+            .await
+            .unwrap();
         let candidates = fetch_disabled_for_recheck(&conn).await.expect("query");
         let ids: Vec<i32> = candidates.iter().map(|c| c.submission_id).collect();
         assert!(!ids.contains(&sid_w), "whitelist 不应进入恢复巡检");
         assert!(!ids.contains(&sid_b), "blacklist 不应进入恢复巡检");
+        assert!(!ids.contains(&sid_banned), "banned(封禁观察) 不应进入恢复巡检");
+    }
+
+    #[tokio::test]
+    async fn fetch_inactive_candidates_excludes_banned_policy() {
+        // 阶段一候选应排除 banned（封禁观察）启用态 UP，避免被「长期不更新」覆盖回 normal+auto
+        let (_dir, conn) = setup_test_db().await;
+        let sid_banned = insert_submission(&conn, 1089, "banned_active", true).await;
+        upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
+            .await
+            .unwrap();
+        let candidates = fetch_inactive_candidates(&conn).await.expect("query");
+        let ids: Vec<i32> = candidates.iter().map(|c| c.submission_id).collect();
+        assert!(
+            !ids.contains(&sid_banned),
+            "banned(封禁观察) 不应进入阶段一候选，否则会被覆盖回 normal"
+        );
     }
 
     #[tokio::test]
@@ -1124,6 +1314,70 @@ mod tests {
             p_before.updated_at, p_after.updated_at,
             "still_inactive 不应触碰 policy"
         );
+    }
+
+    /// 阶段二 Gone outcome（删号/不可恢复）→ 写 Blacklist+Auto，不动 enabled
+    #[tokio::test]
+    async fn phase2_gone_outcome_writes_blacklist() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 300, "gone_up", false).await;
+        // 起始：被自动禁用（normal+auto）
+        upsert_policy(&conn, sid, Policy::Normal, Source::Auto, None)
+            .await
+            .unwrap();
+        // 模拟阶段二收到 Gone outcome 后的处理：写 Blacklist+Auto
+        upsert_policy(
+            &conn,
+            sid,
+            Policy::Blacklist,
+            Source::Auto,
+            Some("UP 已删号/不可恢复：该用户不存在".into()),
+        )
+        .await
+        .unwrap();
+        let p = load_policy(&conn, sid).await.unwrap();
+        assert_eq!(p.policy, Policy::Blacklist, "删号应写黑名单");
+        assert_eq!(p.source, Source::Auto);
+        assert!(!is_submission_enabled(&conn, sid).await.unwrap(), "enabled 保持 false");
+        assert!(p.reason.as_deref().unwrap().contains("删号"), "reason 应注明删号");
+    }
+
+    /// 阶段二 BannedObservation outcome（封禁/冻结）→ 写 Banned+Auto，不动 enabled，不进黑名单
+    #[tokio::test]
+    async fn phase2_banned_observation_outcome_writes_banned() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 301, "banned_up", false).await;
+        // 起始：被自动禁用（normal+auto）
+        upsert_policy(&conn, sid, Policy::Normal, Source::Auto, None)
+            .await
+            .unwrap();
+        // 模拟阶段二收到 BannedObservation outcome 后的处理：写 Banned+Auto
+        upsert_policy(
+            &conn,
+            sid,
+            Policy::Banned,
+            Source::Auto,
+            Some("封禁观察，待人工判断：该账号已封禁".into()),
+        )
+        .await
+        .unwrap();
+        let p = load_policy(&conn, sid).await.unwrap();
+        assert_eq!(p.policy, Policy::Banned, "封禁应写封禁观察而非黑名单");
+        assert_eq!(p.source, Source::Auto);
+        assert!(
+            !is_submission_enabled(&conn, sid).await.unwrap(),
+            "enabled 保持 false，不自动启用"
+        );
+        assert!(
+            p.reason.as_deref().unwrap().contains("封禁观察"),
+            "reason 应注明封禁观察"
+        );
+        // banned UP 不应进入阶段一候选（验证不会被覆盖回 normal）
+        let inactive = fetch_inactive_candidates(&conn).await.unwrap();
+        assert!(!inactive.iter().any(|c| c.submission_id == sid));
+        // banned UP 不应进入恢复巡检候选（验证不会被自动启用）
+        let recheck = fetch_disabled_for_recheck(&conn).await.unwrap();
+        assert!(!recheck.iter().any(|c| c.submission_id == sid));
     }
 
     /// 模拟「try_for_each_concurrent 真并发」：用 sleep 代替网络调用，

@@ -256,9 +256,17 @@
 			showEditDialog = false;
 			toast.success('保存成功');
 		} catch (error) {
-			toast.error('保存失败', {
-				description: (error as ApiError).message
-			});
+			const apiErr = error as ApiError;
+			if (apiErr.status === 409) {
+				// 策略保护：该 UP 受白名单/黑名单/封禁观察保护，需去 UP 自动管理页调整
+				toast.error('无法修改启用状态', {
+					description: `${apiErr.message}（请前往「UP 自动管理」页面调整策略）`
+				});
+			} else {
+				toast.error('保存失败', {
+					description: apiErr.message
+				});
+			}
 		} finally {
 			saving = false;
 		}

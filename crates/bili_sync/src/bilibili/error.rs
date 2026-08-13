@@ -40,20 +40,33 @@ impl BiliError {
     /// 判断错误是否表示 UP 主账号不可用（封禁/注销/不存在/冻结）。
     /// 仅匹配 `ErrorResponse` 的 message 关键词，保守集合，可按上线后实测扩充。
     /// 不能用 code 判定：`-404` 既表示用户不存在也表示视频不存在（workflow.rs 中已用于视频）。
+    ///
+    /// 此函数是 [`is_upper_permanently_gone`] 与 [`is_upper_banned`] 的并集，保留以兼容旧调用点。
+    #[allow(dead_code)]
     pub fn is_upper_unavailable(&self) -> bool {
+        self.is_upper_permanently_gone() || self.is_upper_banned()
+    }
+
+    /// 判断错误是否表示 UP 主账号已永久不可恢复（注销/不存在）。
+    /// 命中后应写入黑名单（Blacklist），不再参与任何巡检。
+    pub fn is_upper_permanently_gone(&self) -> bool {
         if let BiliError::ErrorResponse { message, .. } = self
             && let Some(msg) = message
         {
-            const KEYWORDS: &[&str] = &[
-                "该用户不存在",
-                "用户不存在",
-                "账号已封禁",
-                "账号被封禁",
-                "已注销",
-                "已被冻结",
-                "已被封禁",
-                "空间已封禁",
-            ];
+            const KEYWORDS: &[&str] = &["该用户不存在", "用户不存在", "已注销"];
+            return KEYWORDS.iter().any(|kw| msg.contains(kw));
+        }
+        false
+    }
+
+    /// 判断错误是否表示 UP 主账号被封禁/冻结（短期或永封无法区分）。
+    /// 命中后应进入「封禁观察」状态（Banned），不进黑名单、不进恢复候选，
+    /// 由用户人工判断是否转黑名单。
+    pub fn is_upper_banned(&self) -> bool {
+        if let BiliError::ErrorResponse { message, .. } = self
+            && let Some(msg) = message
+        {
+            const KEYWORDS: &[&str] = &["账号已封禁", "账号被封禁", "已被冻结", "已被封禁", "空间已封禁"];
             return KEYWORDS.iter().any(|kw| msg.contains(kw));
         }
         false
@@ -82,5 +95,42 @@ mod tests {
         // 非 ErrorResponse 变体不应被判为 UP 不可用
         assert!(!BiliError::VideoStreamsEmpty.is_upper_unavailable());
         assert!(!BiliError::RiskControlOccurred("x".to_string()).is_upper_unavailable());
+    }
+
+    #[test]
+    fn test_is_upper_permanently_gone_and_banned_split() {
+        let make = |message: Option<&str>| BiliError::ErrorResponse {
+            code: -404,
+            message: message.map(String::from),
+            response: String::new(),
+        };
+        // (message, 期望 permanently_gone, 期望 banned)
+        // permanently_gone：注销/不存在
+        let cases: &[(&str, bool, bool)] = &[
+            ("该用户不存在", true, false),
+            ("用户不存在", true, false),
+            ("该 UP 已注销", true, false),
+            // banned：封禁/冻结
+            ("该账号已封禁", false, true),
+            ("账号被封禁了", false, true),
+            ("该账号已被冻结", false, true),
+            ("已被封禁，请联系客服", false, true),
+            ("空间已封禁", false, true),
+            // 均不命中
+            ("视频不存在", false, false),
+            ("", false, false),
+        ];
+        for (msg, exp_gone, exp_banned) in cases {
+            let e = make(Some(msg));
+            assert_eq!(e.is_upper_permanently_gone(), *exp_gone, "msg={msg:?}");
+            assert_eq!(e.is_upper_banned(), *exp_banned, "msg={msg:?}");
+            // 并集应等于 is_upper_unavailable
+            assert_eq!(e.is_upper_unavailable(), *exp_gone || *exp_banned, "msg={msg:?}");
+        }
+        // None 与非 ErrorResponse 变体：三个函数都应为 false
+        assert!(!make(None).is_upper_permanently_gone());
+        assert!(!make(None).is_upper_banned());
+        assert!(!BiliError::VideoStreamsEmpty.is_upper_permanently_gone());
+        assert!(!BiliError::VideoStreamsEmpty.is_upper_banned());
     }
 }

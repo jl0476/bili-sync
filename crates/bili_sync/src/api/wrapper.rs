@@ -54,6 +54,14 @@ impl<T: Serialize> ApiResponse<T> {
         }
     }
 
+    pub fn conflict(message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            status_code: 409,
+            data: None,
+            message: Some(message.into()),
+        }
+    }
+
     pub fn internal_server_error(message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             status_code: 500,
@@ -92,6 +100,9 @@ impl IntoResponse for ApiError {
                 InnerApiError::BadRequest(_) => {
                     return ApiResponse::<()>::bad_request(self.0.to_string()).into_response();
                 }
+                InnerApiError::PolicyProtected(_) => {
+                    return ApiResponse::<()>::conflict(self.0.to_string()).into_response();
+                }
             }
         }
         ApiResponse::<()>::internal_server_error(self.0.to_string()).into_response()
@@ -115,5 +126,37 @@ where
             .validate()
             .map_err(|e| ApiError::from(InnerApiError::BadRequest(e.to_string())))?;
         Ok(ValidatedJson(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::error::InnerApiError;
+
+    /// PolicyProtected 错误应映射为 HTTP 409，而非落入默认 500。
+    /// 这是高级策略保护（手动启停受策略保护时拒绝）的关键正确性保证。
+    #[test]
+    fn policy_protected_error_maps_to_409_conflict() {
+        let err: ApiError = InnerApiError::PolicyProtected("该 UP 受黑名单保护".to_string()).into();
+        let response = err.into_response();
+        let status = response.status();
+        assert_eq!(
+            status,
+            reqwest::StatusCode::CONFLICT,
+            "PolicyProtected 必须 409，实际 {status}"
+        );
+    }
+
+    #[test]
+    fn not_found_error_maps_to_404() {
+        let err: ApiError = InnerApiError::NotFound(42).into();
+        assert_eq!(err.into_response().status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn bad_request_error_maps_to_400() {
+        let err: ApiError = InnerApiError::BadRequest("bad".to_string()).into();
+        assert_eq!(err.into_response().status(), reqwest::StatusCode::BAD_REQUEST);
     }
 }
