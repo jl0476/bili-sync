@@ -892,9 +892,8 @@ async fn upsert_policy_txn(
 
 /// 删除用户已有的策略行，根据原策略决定后续语义：
 ///
-/// - `Blacklist` / `Banned`：改写为 `normal+auto` 并保留当前 enabled 状态。这样恢复巡检
-///   （限定 source=auto）能命中该 UP 并在检测到新投稿时自动重新启用，符合用户
-///   「删除黑名单/清除封禁观察 = 允许自动恢复」的预期。
+/// - `Blacklist` / `Banned`：删除策略行并保留当前 enabled 状态，避免写入 normal 策略。
+///   删除 Banned 后仍保持 disabled，等待手动巡检复核。
 /// - `Whitelist` / `Normal`：直接删除行。删除白名单后该 UP 重新进入自动禁用巡检候选；
 ///   删除 normal 策略后该 UP 不再保留任何策略标记，完全交由系统/用户手动管理。
 ///
@@ -908,31 +907,10 @@ pub async fn reset_policy_after_delete(
     // 锁由调用方（API handler / update_video_source）在外层持有，这里不再加锁，
     // 避免 tokio Mutex 不可重入导致死锁。
     match original_policy {
-        UpperManagePolicy::Blacklist => {
-            let txn = connection.begin().await?;
-            upsert_policy_txn(
-                &txn,
-                submission_id,
-                UpperManagePolicy::Normal,
-                UpperManageSource::Auto,
-                Some("用户删除黑名单，允许自动恢复".to_string()),
-            )
-            .await?;
-            txn.commit().await?;
-        }
-        UpperManagePolicy::Banned => {
-            let txn = connection.begin().await?;
-            upsert_policy_txn(
-                &txn,
-                submission_id,
-                UpperManagePolicy::Normal,
-                UpperManageSource::Auto,
-                Some("用户清除封禁观察，允许自动恢复".to_string()),
-            )
-            .await?;
-            txn.commit().await?;
-        }
-        UpperManagePolicy::Whitelist | UpperManagePolicy::Normal => {
+        UpperManagePolicy::Blacklist
+        | UpperManagePolicy::Banned
+        | UpperManagePolicy::Whitelist
+        | UpperManagePolicy::Normal => {
             upper_auto_manage_policy::Entity::delete_by_id(submission_id)
                 .exec(connection)
                 .await?;
@@ -1124,7 +1102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_policy_after_delete_rewrites_blacklist_to_normal_auto() {
+    async fn reset_policy_after_delete_removes_blacklist_row() {
         let (_dir, conn) = setup_test_db().await;
         let sid = insert_submission(&conn, 102, "carol", false).await;
         // 起始状态：黑名单
@@ -1137,20 +1115,21 @@ mod tests {
         )
         .await
         .expect("seed blacklist");
-        // 删除黑名单：应改写为 normal+auto，允许自动恢复
+        // 删除黑名单：应删除策略行；禁用状态保留，等待手动巡检复核
         reset_policy_after_delete(&conn, sid, Policy::Blacklist)
             .await
             .expect("reset");
-        let p = load_policy(&conn, sid).await.expect("policy 行必须存在");
-        assert_eq!(p.policy, Policy::Normal);
-        assert_eq!(p.source, Source::Auto, "恢复巡检要求 source=auto");
+        assert!(
+            load_policy(&conn, sid).await.is_none(),
+            "删除黑名单后不应保留 normal 策略"
+        );
         // 当前 enabled 状态应被保留
         assert!(!is_submission_enabled(&conn, sid).await.unwrap());
     }
 
     #[tokio::test]
-    async fn reset_policy_after_delete_rewrites_banned_to_normal_auto() {
-        // 删除「封禁观察」策略：应改写为 normal+auto，允许恢复巡检重新评估
+    async fn reset_policy_after_delete_removes_banned_row_and_keeps_disabled() {
+        // 删除「封禁观察」策略：应删除策略行，保持 disabled，等待手动巡检复核
         let (_dir, conn) = setup_test_db().await;
         let sid = insert_submission(&conn, 10201, "banned_up", false).await;
         upsert_policy(&conn, sid, Policy::Banned, Source::Auto, Some("封禁观察".to_string()))
@@ -1159,9 +1138,10 @@ mod tests {
         reset_policy_after_delete(&conn, sid, Policy::Banned)
             .await
             .expect("reset banned");
-        let p = load_policy(&conn, sid).await.expect("policy 行必须存在");
-        assert_eq!(p.policy, Policy::Normal);
-        assert_eq!(p.source, Source::Auto, "清除封禁观察后应为 normal+auto 以允许自动恢复");
+        assert!(
+            load_policy(&conn, sid).await.is_none(),
+            "清除封禁观察后不应写入 normal 策略"
+        );
         assert!(
             !is_submission_enabled(&conn, sid).await.unwrap(),
             "enabled 状态应被保留"
@@ -1248,8 +1228,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_disabled_for_recheck_excludes_manual_source_normal_policy() {
-        // 用户手动 normal+manual + enabled=false 不应进入恢复巡检，避免破坏「手动禁用不自动恢复」
+    async fn fetch_disabled_for_recheck_includes_manual_source_normal_policy() {
+        // 用户手动 normal+manual + enabled=false 仍会进入恢复巡检候选；名称和断言明确记录当前行为
         let (_dir, conn) = setup_test_db().await;
         let sid = insert_submission(&conn, 1051, "manual", false).await;
         upsert_policy(&conn, sid, Policy::Normal, Source::Manual, Some("用户手动".to_string()))
