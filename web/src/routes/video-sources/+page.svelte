@@ -36,6 +36,7 @@
 	import api from '$lib/api';
 	import RuleEditor from '$lib/components/rule-editor.svelte';
 	import ListRestartIcon from '@lucide/svelte/icons/list-restart';
+	import PowerIcon from '@lucide/svelte/icons/power';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import FilterOptionEditor from '$lib/components/filter-option-editor.svelte';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
@@ -56,8 +57,9 @@
 	let showEditDialog = false;
 	let editingSource: VideoSourceDetail | null = null;
 	let editingType = '';
-	let editingIdx: number = 0;
 	let saving = false;
+	// 行内启用/禁用切换：正在请求的 source id，用于按钮 disabled 态防重复点击
+	let togglingId: number | null = null;
 	let useCustomFilterOption = false;
 	let editFilterOption: FilterOption | null = null;
 
@@ -71,7 +73,6 @@
 	let showRemoveDialog = false;
 	let removeSource: VideoSourceDetail | null = null;
 	let removeType = '';
-	let removeIdx: number = 0;
 	let removing = false;
 
 	// 全量更新对话框状态
@@ -159,10 +160,9 @@
 	}
 
 	// 打开编辑对话框
-	function openEditDialog(type: string, source: VideoSourceDetail, idx: number) {
+	function openEditDialog(type: string, source: VideoSourceDetail) {
 		editingSource = source;
 		editingType = type;
-		editingIdx = idx;
 		editForm = {
 			path: source.path,
 			enabled: source.enabled,
@@ -174,16 +174,57 @@
 		showEditDialog = true;
 	}
 
+	// 行内切换启用/禁用：悲观更新，API 成功后才改本地数据
+	async function toggleEnabled(type: string, source: VideoSourceDetail) {
+		togglingId = source.id;
+		try {
+			const response = await api.updateVideoSource(type, source.id, {
+				path: source.path,
+				enabled: !source.enabled,
+				rule: source.rule,
+				useDynamicApi: source.useDynamicApi,
+				filterOption: source.filterOption
+			});
+			if (videoSourcesData) {
+				const sources = videoSourcesData[
+					type as keyof VideoSourcesDetailsResponse
+				] as VideoSourceDetail[];
+				const idx = sources.findIndex((s) => s.id === source.id);
+				if (idx !== -1) {
+					sources[idx] = {
+						...sources[idx],
+						enabled: !source.enabled,
+						ruleDisplay: response.data.ruleDisplay
+					};
+					videoSourcesData = { ...videoSourcesData };
+				}
+			}
+			toast.success(!source.enabled ? '已启用' : '已禁用');
+		} catch (error) {
+			const apiErr = error as ApiError;
+			if (apiErr.status === 409) {
+				toast.error('无法修改启用状态', {
+					description: `${apiErr.message}（请前往「UP 自动管理」页面调整策略）`
+				});
+			} else {
+				toast.error('操作失败', {
+					description: apiErr.message
+				});
+			}
+		} finally {
+			togglingId = null;
+		}
+	}
+
 	function openEvaluateRules(type: string, source: VideoSourceDetail) {
 		evaluateSource = source;
 		evaluateType = type;
 		showEvaluateDialog = true;
 	}
 
-	function openRemoveDialog(type: string, source: VideoSourceDetail, idx: number) {
+	function openRemoveDialog(type: string, source: VideoSourceDetail) {
 		removeSource = source;
 		removeType = type;
-		removeIdx = idx;
 		showRemoveDialog = true;
 	}
 
@@ -242,21 +283,24 @@
 				useDynamicApi: editForm.useDynamicApi,
 				filterOption: useCustomFilterOption ? editFilterOption : null
 			});
-			// 更新本地数据
+			// 更新本地数据：用 id 定位，避免排序后下标错位
 			if (videoSourcesData && editingSource) {
 				const sources = videoSourcesData[
 					editingType as keyof VideoSourcesDetailsResponse
 				] as VideoSourceDetail[];
-				sources[editingIdx] = {
-					...sources[editingIdx],
-					path: editForm.path,
-					enabled: editForm.enabled,
-					rule: editForm.rule,
-					useDynamicApi: editForm.useDynamicApi,
-					filterOption: useCustomFilterOption ? structuredClone(editFilterOption) : null,
-					ruleDisplay: response.data.ruleDisplay
-				};
-				videoSourcesData = { ...videoSourcesData };
+				const idx = sources.findIndex((s) => s.id === editingSource!.id);
+				if (idx !== -1) {
+					sources[idx] = {
+						...sources[idx],
+						path: editForm.path,
+						enabled: editForm.enabled,
+						rule: editForm.rule,
+						useDynamicApi: editForm.useDynamicApi,
+						filterOption: useCustomFilterOption ? structuredClone(editFilterOption) : null,
+						ruleDisplay: response.data.ruleDisplay
+					};
+					videoSourcesData = { ...videoSourcesData };
+				}
 			}
 			showEditDialog = false;
 			toast.success('保存成功');
@@ -307,8 +351,11 @@
 					const sources = videoSourcesData[
 						removeType as keyof VideoSourcesDetailsResponse
 					] as VideoSourceDetail[];
-					sources.splice(removeIdx, 1);
-					videoSourcesData = { ...videoSourcesData };
+					const idx = sources.findIndex((s) => s.id === removeSource!.id);
+					if (idx !== -1) {
+						sources.splice(idx, 1);
+						videoSourcesData = { ...videoSourcesData };
+					}
 				}
 				showRemoveDialog = false;
 				toast.success('删除视频源成功');
@@ -562,7 +609,23 @@
 														<Button
 															size="sm"
 															variant="outline"
-															onclick={() => openEditDialog(key, source, index)}
+															disabled={togglingId === source.id}
+															onclick={() => toggleEnabled(key, source)}
+															class="h-8 w-8 p-0"
+														>
+															<PowerIcon class="h-3 w-3" />
+														</Button>
+													</Tooltip.Trigger>
+													<Tooltip.Content>
+														<p class="text-xs">{source.enabled ? '禁用' : '启用'}</p>
+													</Tooltip.Content>
+												</Tooltip.Root>
+												<Tooltip.Root disableHoverableContent={true}>
+													<Tooltip.Trigger>
+														<Button
+															size="sm"
+															variant="outline"
+															onclick={() => openEditDialog(key, source)}
 															class="h-8 w-8 p-0"
 														>
 															<SquarePenIcon class="h-3 w-3" />
@@ -608,7 +671,7 @@
 															<Button
 																size="sm"
 																variant="outline"
-																onclick={() => openRemoveDialog(key, source, index)}
+																onclick={() => openRemoveDialog(key, source)}
 																class="h-8 w-8 p-0"
 															>
 																<Trash2Icon class="h-3 w-3" />
