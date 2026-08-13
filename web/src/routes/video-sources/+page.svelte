@@ -20,6 +20,9 @@
 	import SquarePenIcon from '@lucide/svelte/icons/square-pen';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import UserIcon from '@lucide/svelte/icons/user';
+	import ArrowUpDownIcon from '@lucide/svelte/icons/arrow-up-down';
+	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
+	import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { toast } from 'svelte-sonner';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
@@ -40,6 +43,8 @@
 	let videoSourcesData: VideoSourcesDetailsResponse | null = null;
 	let loading = false;
 	let activeTab = 'favorites';
+	// 最新视频时间排序状态：none=不排序，desc=降序，asc=升序（点击列头循环切换）
+	let latestAtSortOrder: 'none' | 'desc' | 'asc' = 'none';
 	let globalFilterOption: FilterOption | null = null;
 
 	// 添加对话框状态
@@ -321,7 +326,22 @@
 
 	function getSourcesForTab(tabValue: string): VideoSourceDetail[] {
 		if (!videoSourcesData) return [];
-		return videoSourcesData[tabValue as keyof VideoSourcesDetailsResponse] as VideoSourceDetail[];
+		const sources = videoSourcesData[
+			tabValue as keyof VideoSourcesDetailsResponse
+		] as VideoSourceDetail[];
+		if (latestAtSortOrder === 'none') return sources;
+		return [...sources].sort((a, b) => {
+			// latestRowAt 缺失时落到 0，避免空值打散顺序；null 检查对 Date | string 兼容
+			const aTime = a.latestRowAt ? new Date(a.latestRowAt).getTime() : 0;
+			const bTime = b.latestRowAt ? new Date(b.latestRowAt).getTime() : 0;
+			return latestAtSortOrder === 'asc' ? aTime - bTime : bTime - aTime;
+		});
+	}
+
+	// 点击「最新视频时间」列头循环切换排序方向
+	function toggleLatestAtSort() {
+		latestAtSortOrder =
+			latestAtSortOrder === 'none' ? 'desc' : latestAtSortOrder === 'desc' ? 'asc' : 'none';
 	}
 
 	// 打开添加对话框
@@ -432,14 +452,29 @@
 											<Table.Head class={HEAD_WIDTHS[key].upperId}>UP 主 ID</Table.Head>
 										{/if}
 										<Table.Head class={HEAD_WIDTHS[key].path}>下载路径</Table.Head>
-										<Table.Head class={HEAD_WIDTHS[key].latest}>最新视频时间</Table.Head>
+										<Table.Head class={HEAD_WIDTHS[key].latest}>
+											<button
+												type="button"
+												class="hover:text-foreground text-muted-foreground flex cursor-pointer items-center gap-1 transition-colors"
+												onclick={toggleLatestAtSort}
+											>
+												最新视频时间
+												{#if latestAtSortOrder === 'asc'}
+													<ArrowUpIcon class="h-3.5 w-3.5" />
+												{:else if latestAtSortOrder === 'desc'}
+													<ArrowDownIcon class="h-3.5 w-3.5" />
+												{:else}
+													<ArrowUpDownIcon class="h-3.5 w-3.5 opacity-50" />
+												{/if}
+											</button>
+										</Table.Head>
 										<Table.Head class={HEAD_WIDTHS[key].rule}>过滤规则</Table.Head>
 										<Table.Head class={HEAD_WIDTHS[key].enabled}>启用状态</Table.Head>
 										<Table.Head class="{HEAD_WIDTHS[key].actions} text-right">操作</Table.Head>
 									</Table.Row>
 								</Table.Header>
 								<Table.Body>
-									{#each sources as source, index (index)}
+									{#each sources as source (source.id)}
 										<Table.Row>
 											<Table.Cell class="font-medium">{source.name}</Table.Cell>
 											{#if key === 'submissions'}
