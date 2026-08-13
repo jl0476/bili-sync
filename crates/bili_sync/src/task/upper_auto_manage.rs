@@ -686,8 +686,8 @@ async fn check_disabled_upper(
                 });
             }
             // 字段命名历史：space/wbi/arc/search 接口在正常下载流程中只反序列化 `created` 为 ctime
-// （见 bilibili/mod.rs::VideoInfo::Submission），`pubdate` 在该接口下不存在。
-// 这里优先用 `created`，与正常下载行为一致；找不到才退到 `pubdate` 兼容旧版本。
+            // （见 bilibili/mod.rs::VideoInfo::Submission），`pubdate` 在该接口下不存在。
+            // 这里优先用 `created`，与正常下载行为一致；找不到才退到 `pubdate` 兼容旧版本。
             let latest_pubdate = match vlist[0]["created"].as_i64().or_else(|| vlist[0]["pubdate"].as_i64()) {
                 Some(ts) => ts,
                 None => {
