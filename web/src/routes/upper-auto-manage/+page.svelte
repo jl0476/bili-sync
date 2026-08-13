@@ -8,11 +8,13 @@
 	import * as Table from '$lib/components/ui/table/index.js';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
+	import * as Dialog from '$lib/components/ui/dialog/index.js';
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 	import { toast } from 'svelte-sonner';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import type {
@@ -59,6 +61,25 @@
 	let newPolicyValue = $state<UpperManagePolicy>('whitelist');
 	let newPolicyReason = $state('');
 	let creatingPolicy = $state(false);
+	let showCreateDialog = $state(false);
+	let createSearchQuery = $state('');
+	let policySearchQuery = $state('');
+
+	// Dialog 内候选列表：仅未设策略的 UP + 按搜索词过滤
+	const createFilteredCandidates = $derived(
+		candidates.filter(
+			(c) =>
+				c.policy === null &&
+				(createSearchQuery === '' ||
+					c.upperName.toLowerCase().includes(createSearchQuery.toLowerCase()))
+		)
+	);
+	// 政策表名称搜索（客户端过滤，与 server 端 policyFilter 叠加）
+	const filteredPolicies = $derived(
+		policySearchQuery === ''
+			? policies
+			: policies.filter((p) => p.upperName.toLowerCase().includes(policySearchQuery.toLowerCase()))
+	);
 
 	// 删除确认
 	let showDeleteDialog = $state(false);
@@ -189,8 +210,10 @@
 				reason: newPolicyReason.trim() || undefined
 			});
 			toast.success('已创建策略');
+			showCreateDialog = false;
 			newPolicySubmissionId = '';
 			newPolicyReason = '';
+			createSearchQuery = '';
 			await Promise.all([loadPolicies(), loadCandidates()]);
 		} catch (e) {
 			toast.error('创建策略失败', { description: (e as ApiError).message });
@@ -468,7 +491,8 @@
 					value={actionFilter}
 					onchange={(e) => {
 						actionFilter = (e.currentTarget as HTMLSelectElement).value as
-							UpperManageActionType | '';
+							| UpperManageActionType
+							| '';
 						onActionFilterChange();
 					}}
 				>
@@ -519,55 +543,7 @@
 
 		<!-- 白名单/黑名单 -->
 		<Tabs.Content value="policies" class="mt-4">
-			<!-- 新建策略：选择从未自动处理过的 UP 设为首条白/黑名单 -->
-			<div class="bg-muted/30 mb-4 rounded-lg border p-4">
-				<h3 class="mb-2 text-sm font-semibold">新建策略</h3>
-				<p class="text-muted-foreground mb-3 text-xs">
-					从未被自动处理过的 UP 不会出现在下方列表中，可在此处挑选并设为首条白/黑名单。
-				</p>
-				<div class="flex flex-wrap items-end gap-2">
-					<div class="min-w-[180px] flex-1">
-						<Label>UP 主</Label>
-						<select
-							class="bg-background h-9 w-full rounded border px-2 text-sm"
-							value={newPolicySubmissionId}
-							onchange={(e) => {
-								const v = (e.currentTarget as HTMLSelectElement).value;
-								newPolicySubmissionId = v === '' ? '' : Number(v);
-							}}
-						>
-							<option value="">请选择 UP 主</option>
-							{#each candidates.filter((c) => c.policy === null) as c (c.submissionId)}
-								<option value={c.submissionId}>{c.upperName}</option>
-							{/each}
-						</select>
-					</div>
-					<div>
-						<Label>策略</Label>
-						<select
-							class="bg-background h-9 rounded border px-2 text-sm"
-							value={newPolicyValue}
-							onchange={(e) => {
-								newPolicyValue = (e.currentTarget as HTMLSelectElement).value as UpperManagePolicy;
-							}}
-						>
-							<option value="whitelist">白名单</option>
-							<option value="blacklist">黑名单</option>
-							<option value="banned">封禁观察</option>
-							<option value="normal">正常</option>
-						</select>
-					</div>
-					<div class="min-w-[180px] flex-1">
-						<Label>原因（可选）</Label>
-						<Input bind:value={newPolicyReason} placeholder="例如：手动设为白名单" />
-					</div>
-					<Button onclick={createPolicy} disabled={creatingPolicy || newPolicySubmissionId === ''}>
-						{creatingPolicy ? '创建中…' : '创建策略'}
-					</Button>
-				</div>
-			</div>
-
-			<div class="mb-3 flex items-center gap-2">
+			<div class="mb-3 flex flex-wrap items-center gap-2">
 				<Label>策略筛选</Label>
 				<select
 					class="bg-background h-9 rounded border px-2 text-sm"
@@ -583,14 +559,29 @@
 					<option value="banned">封禁观察</option>
 					<option value="normal">正常</option>
 				</select>
+				<Input
+					class="h-9 max-w-48"
+					placeholder="搜索 UP 主名称..."
+					bind:value={policySearchQuery}
+				/>
 				<Button variant="outline" size="sm" onclick={loadPolicies}>
 					<RefreshCwIcon class="mr-1 size-4" />刷新
 				</Button>
-				<span class="text-muted-foreground text-xs">
-					白名单 = 永不自动禁用 ｜ 黑名单 = 永不自动启用（删号/不可恢复） ｜ 封禁观察 = UP
-					疑似封禁/冻结，待人工判断是否转黑名单
-				</span>
+				<Button
+					size="sm"
+					class="ml-auto"
+					onclick={() => {
+						createSearchQuery = '';
+						showCreateDialog = true;
+					}}
+				>
+					<PlusIcon class="mr-1 size-4" />新建策略
+				</Button>
 			</div>
+			<p class="text-muted-foreground mb-3 text-xs">
+				白名单 = 永不自动禁用 ｜ 黑名单 = 永不自动启用（删号/不可恢复） ｜ 封禁观察 = UP
+				疑似封禁/冻结，待人工判断是否转黑名单
+			</p>
 			<Table.Root>
 				<Table.Header>
 					<Table.Row>
@@ -604,7 +595,7 @@
 					</Table.Row>
 				</Table.Header>
 				<Table.Body>
-					{#each policies as p (p.submissionId)}
+					{#each filteredPolicies as p (p.submissionId)}
 						<Table.Row>
 							<Table.Cell>{p.upperName}</Table.Cell>
 							<Table.Cell>
@@ -662,6 +653,64 @@
 		</Tabs.Content>
 	</Tabs.Root>
 </div>
+
+<!-- 新建策略对话框 -->
+<Dialog.Root bind:open={showCreateDialog}>
+	<Dialog.Content>
+		<Dialog.Title class="text-lg font-semibold">新建策略</Dialog.Title>
+		<p class="text-muted-foreground text-sm">
+			从未被自动处理过的 UP 不会出现在列表中，可在此处挑选并设为白/黑名单。
+		</p>
+		<div class="mt-4 space-y-4">
+			<div class="space-y-2">
+				<Label>UP 主</Label>
+				<Input placeholder="搜索 UP 主名称..." bind:value={createSearchQuery} />
+				<div class="max-h-60 overflow-y-auto rounded-md border">
+					{#each createFilteredCandidates as c (c.submissionId)}
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between px-3 py-2 text-left text-sm {newPolicySubmissionId ===
+							c.submissionId
+								? 'bg-accent'
+								: ''}"
+							onclick={() => (newPolicySubmissionId = c.submissionId)}
+						>
+							<span>{c.upperName}</span>
+							<span class="text-muted-foreground text-xs">{c.upperId}</span>
+						</button>
+					{:else}
+						<div class="text-muted-foreground px-3 py-2 text-sm">未找到匹配的 UP 主</div>
+					{/each}
+				</div>
+			</div>
+			<div>
+				<Label>策略</Label>
+				<select
+					class="bg-background h-9 w-full rounded border px-2 text-sm"
+					value={newPolicyValue}
+					onchange={(e) => {
+						newPolicyValue = (e.currentTarget as HTMLSelectElement).value as UpperManagePolicy;
+					}}
+				>
+					<option value="whitelist">白名单</option>
+					<option value="blacklist">黑名单</option>
+					<option value="banned">封禁观察</option>
+					<option value="normal">正常</option>
+				</select>
+			</div>
+			<div>
+				<Label>原因（可选）</Label>
+				<Input bind:value={newPolicyReason} placeholder="例如：手动设为白名单" />
+			</div>
+		</div>
+		<div class="mt-6 flex justify-end gap-3">
+			<Button variant="outline" onclick={() => (showCreateDialog = false)}>取消</Button>
+			<Button onclick={createPolicy} disabled={creatingPolicy || newPolicySubmissionId === ''}>
+				{creatingPolicy ? '创建中…' : '创建'}
+			</Button>
+		</div>
+	</Dialog.Content>
+</Dialog.Root>
 
 <AlertDialog.Root bind:open={showDeleteDialog}>
 	<AlertDialog.Content>
