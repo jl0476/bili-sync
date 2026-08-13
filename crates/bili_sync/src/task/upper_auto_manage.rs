@@ -685,12 +685,36 @@ async fn check_disabled_upper(
                     upper_name: cand.upper_name.clone(),
                 });
             }
-            let latest_pubdate = vlist[0]["pubdate"]
-                .as_i64()
-                .with_context(|| format!("解析 UP {} 投稿 pubdate 失败", cand.upper_id))?;
-            let latest_pubtime = chrono::DateTime::from_timestamp(latest_pubdate, 0)
-                .map(|dt| dt.naive_utc())
-                .context("invalid pubdate timestamp")?;
+            let latest_pubdate = match vlist[0]["pubdate"].as_i64() {
+                Some(ts) => ts,
+                None => {
+                    // 数据异常（字段缺失/类型错误）只影响这一个 UP，不应中断整轮巡检。
+                    // 按「仍不活跃」处理：下一轮再试；同时打印原始片段便于诊断。
+                    warn!(
+                        "解析 UP「{}」({}) 最新投稿 pubdate 失败，按不活跃处理；raw[0]={}",
+                        cand.upper_name, cand.upper_id, vlist[0]
+                    );
+                    return Ok(CheckOutcome {
+                        kind: CheckOutcomeKind::StillInactive,
+                        submission_id: cand.submission_id,
+                        upper_name: cand.upper_name.clone(),
+                    });
+                }
+            };
+            let latest_pubtime = match chrono::DateTime::from_timestamp(latest_pubdate, 0) {
+                Some(dt) => dt.naive_utc(),
+                None => {
+                    warn!(
+                        "UP「{}」({}) pubdate={} 超出合法时间戳范围，按不活跃处理",
+                        cand.upper_name, cand.upper_id, latest_pubdate
+                    );
+                    return Ok(CheckOutcome {
+                        kind: CheckOutcomeKind::StillInactive,
+                        submission_id: cand.submission_id,
+                        upper_name: cand.upper_name.clone(),
+                    });
+                }
+            };
             let recovered = match cand.last_pubtime {
                 Some(known) => latest_pubtime > known,
                 None => true,

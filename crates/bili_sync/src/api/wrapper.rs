@@ -112,6 +112,23 @@ impl IntoResponse for ApiError {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ValidatedJson<T>(pub T);
 
+impl<T, S> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned + Validate,
+    S: Send + Sync,
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state).await?;
+        value
+            .validate()
+            .map_err(|e| ApiError::from(InnerApiError::BadRequest(e.to_string())))?;
+        Ok(ValidatedJson(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,22 +158,5 @@ mod tests {
     fn bad_request_error_maps_to_400() {
         let err: ApiError = InnerApiError::BadRequest("bad".to_string()).into();
         assert_eq!(err.into_response().status(), reqwest::StatusCode::BAD_REQUEST);
-    }
-}
-
-impl<T, S> FromRequest<S> for ValidatedJson<T>
-where
-    T: DeserializeOwned + Validate,
-    S: Send + Sync,
-    Json<T>: FromRequest<S, Rejection = JsonRejection>,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state).await?;
-        value
-            .validate()
-            .map_err(|e| ApiError::from(InnerApiError::BadRequest(e.to_string())))?;
-        Ok(ValidatedJson(value))
     }
 }
