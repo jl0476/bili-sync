@@ -281,7 +281,7 @@ async fn update_submission_source(
     request: UpdateVideoSourceRequest,
     rule_display: Option<String>,
 ) -> Result<ApiResponse<UpdateVideoSourceResponse>, ApiError> {
-    use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
+    use bili_sync_entity::upper_auto_manage_policy::UpperManagePolicy;
     use bili_sync_entity::{submission, upper_auto_manage_policy};
 
     let filter_option = request.filter_option.map(serde_json::to_value).transpose()?;
@@ -330,30 +330,10 @@ async fn update_submission_source(
     }
     active_model.save(&txn).await?;
 
-    // 策略联动：仅普通可恢复态（None 或 Normal 任意 source）在 enabled 变化时联动
+    // enabled 变化不写普通策略；启用时清理历史 normal，保留高级策略已在上方拦截
     let is_normal_like = matches!(prior_policy_value, None | Some(UpperManagePolicy::Normal));
-    if is_normal_like && enabled_change {
-        let now = chrono::Utc::now().naive_utc();
-        if prior_enabled && !request.enabled {
-            // 启用→禁用：写 Normal+Auto（覆盖 source），使其进入恢复巡检候选
-            let am = upper_auto_manage_policy::ActiveModel {
-                submission_id: Set(id),
-                policy: Set(UpperManagePolicy::Normal),
-                source: Set(UpperManageSource::Auto),
-                reason: Set(Some("用户手动禁用".to_string())),
-                updated_at: Set(now),
-            };
-            if prior_policy.is_some() {
-                am.update(&txn).await?;
-            } else {
-                am.insert(&txn).await?;
-            }
-        } else if !prior_enabled && request.enabled {
-            // 禁用→启用：删除 Normal+Auto 行（若存在），避免恢复巡检继续跟踪
-            if prior_policy.is_some() {
-                upper_auto_manage_policy::Entity::delete_by_id(id).exec(&txn).await?;
-            }
-        }
+    if is_normal_like && enabled_change && !prior_enabled && request.enabled && prior_policy.is_some() {
+        upper_auto_manage_policy::Entity::delete_by_id(id).exec(&txn).await?;
     }
 
     txn.commit().await?;

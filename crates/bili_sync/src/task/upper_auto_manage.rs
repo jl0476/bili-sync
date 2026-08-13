@@ -85,7 +85,12 @@ impl UpperAutoManageTaskManager {
     ///
     /// 返回 `Ok(true)` 表示已成功排队，`Ok(false)` 表示已有巡检排队/执行中（防重）。
     /// slot 占用发生在此处入口，释放在 `execute_inspection` 的 finally（覆盖排队→执行→完成全窗口）。
+    #[allow(dead_code)]
     pub async fn run_once(&self) -> Result<bool> {
+        self.run_once_with_trigger(InspectionTrigger::Manual).await
+    }
+
+    pub async fn run_once_with_trigger(&self, trigger: InspectionTrigger) -> Result<bool> {
         // 占用 slot：与定时触发互斥
         {
             let mut slot = self.cx.run_slot.lock().await;
@@ -102,7 +107,7 @@ impl UpperAutoManageTaskManager {
             .add(Job::new_one_shot_async(Duration::from_secs(0), move |uuid, l| {
                 let cx = cx.clone();
                 Box::pin(async move {
-                    cx.execute_inspection(uuid, l).await;
+                    cx.execute_inspection(uuid, l, trigger).await;
                 })
             })?)
             .await;
@@ -255,7 +260,7 @@ fn run_inspection_task(
                 warn!("已有 UP 主自动巡检任务排队/执行中，跳过本次定时触发");
                 return;
             }
-            cx.execute_inspection(uuid, l).await;
+            cx.execute_inspection(uuid, l, InspectionTrigger::Scheduled).await;
         })
     }
 }
@@ -264,7 +269,12 @@ impl TaskContext {
     /// 共享执行：假定调用方已占用 run_slot。执行巡检、更新状态、finally 释放 slot。
     /// 由定时任务闭包与手动 one-shot 闭包共同调用，保证状态收尾（is_running /
     /// last_run / last_finish / next_run / 错误通知 / slot 释放）逻辑一致。
-    async fn execute_inspection(self: &Arc<Self>, job_uuid: uuid::Uuid, mut sched: JobScheduler) {
+    async fn execute_inspection(
+        self: &Arc<Self>,
+        job_uuid: uuid::Uuid,
+        mut sched: JobScheduler,
+        trigger: InspectionTrigger,
+    ) {
         let _ = self.status_tx.send(TaskStatus {
             is_running: true,
             last_run: Some(chrono::Local::now()),
@@ -273,7 +283,7 @@ impl TaskContext {
         });
         info!("开始执行本轮 UP 主自动巡检任务..");
         let config = VersionedConfig::get().snapshot();
-        match run_inspection(&self.connection, &self.bili_client, &config).await {
+        match run_inspection(&self.connection, &self.bili_client, &config, trigger).await {
             Ok(stats) => info!(
                 "本轮 UP 主自动巡检任务执行完毕：检查 {}，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}",
                 stats.checked, stats.disabled, stats.enabled, stats.banned, stats.banned_observation, stats.skipped
@@ -330,6 +340,7 @@ async fn run_inspection(
     connection: &DatabaseConnection,
     bili_client: &BiliClient,
     config: &Arc<Config>,
+    trigger: InspectionTrigger,
 ) -> Result<RunStats> {
     let started_at = chrono::Utc::now().naive_utc();
     let run = upper_auto_manage_run::ActiveModel {
@@ -341,7 +352,7 @@ async fn run_inspection(
         .exec(connection)
         .await?
         .last_insert_id;
-    let result = run_inspection_inner(connection, bili_client, config, run_id).await;
+    let result = run_inspection_inner(connection, bili_client, config, run_id, trigger).await;
     let (status, error_message, summary, stats) = match &result {
         Ok(stats) => (
             RunStatus::Succeeded,
@@ -395,6 +406,7 @@ async fn run_inspection_inner(
     bili_client: &BiliClient,
     config: &Arc<Config>,
     run_id: i32,
+    trigger: InspectionTrigger,
 ) -> Result<RunStats> {
     let opt = &config.upper_auto_manage;
     let now = chrono::Utc::now().naive_utc();
@@ -412,15 +424,8 @@ async fn run_inspection_inner(
         };
         let days = (now - last_pub).num_days();
         if days > opt.inactive_threshold_days {
-            // 停用 + 写入策略放在同一事务，保证失败时不会被孤立禁用
-            disable_submission_with_policy(
-                connection,
-                cand.submission_id,
-                UpperManagePolicy::Normal,
-                UpperManageSource::Auto,
-                Some(format!("{} 天未更新", days)),
-            )
-            .await?;
+            // 停用仅更新 enabled，不写入普通策略
+            disable_submission(connection, cand.submission_id).await?;
             stats.disabled += 1;
             pending_actions.push(PendingAction {
                 submission_id: cand.submission_id,
@@ -436,7 +441,7 @@ async fn run_inspection_inner(
     }
 
     // 阶段二：主动拉取接口检查禁用态（系统自动禁用的）UP 是否恢复更新
-    let disabled_candidates = fetch_disabled_for_recheck(connection).await?;
+    let disabled_candidates = fetch_disabled_for_recheck(connection, trigger).await?;
     stats.checked += disabled_candidates.len() as i32;
     if !disabled_candidates.is_empty() {
         // 拿到带固定限流器的客户端快照（与主下载任务共享限流配额）
@@ -476,14 +481,16 @@ async fn run_inspection_inner(
                     } = outcome;
                     match kind {
                         CheckOutcomeKind::Recovered(latest_pubtime) => {
-                            enable_submission_with_policy(
-                                connection,
-                                submission_id,
-                                UpperManagePolicy::Normal,
-                                UpperManageSource::Auto,
-                                Some(format!("检测到新投稿，时间 {}", latest_pubtime)),
-                            )
-                            .await?;
+                            if matches!(trigger, InspectionTrigger::Manual)
+                                && matches!(
+                                    load_policy_for_submission(connection, submission_id).await?,
+                                    Some(UpperManagePolicy::Banned)
+                                )
+                            {
+                                recover_banned_submission(connection, submission_id).await?;
+                            } else {
+                                enable_submission(connection, submission_id).await?;
+                            }
                             stats_arc.lock().await.enabled += 1;
                             info!("UP「{}」({}) 检测到恢复更新，已自动重新启用", upper_name, submission_id);
                             pending_actions_arc.lock().await.push(PendingAction {
@@ -601,6 +608,12 @@ async fn run_inspection_inner(
     Ok(stats)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectionTrigger {
+    Scheduled,
+    Manual,
+}
+
 #[derive(FromQueryResult)]
 struct SubmissionActivity {
     submission_id: i32,
@@ -634,16 +647,25 @@ GROUP BY s.id, s.upper_id, s.upper_name";
 /// 这里严格限定 source='auto'：只有「系统写下的 normal+auto」才会被自动重新启用。
 /// 用户手动创建 normal+manual 后再手动禁用 submission 的情形不会被命中，
 /// 避免破坏「手动禁用不自动恢复」的语义。
-async fn fetch_disabled_for_recheck(connection: &DatabaseConnection) -> Result<Vec<SubmissionActivity>> {
-    let sql = "
-SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
+async fn fetch_disabled_for_recheck(
+    connection: &DatabaseConnection,
+    trigger: InspectionTrigger,
+) -> Result<Vec<SubmissionActivity>> {
+    let excluded = match trigger {
+        InspectionTrigger::Scheduled => "'blacklist', 'banned'",
+        InspectionTrigger::Manual => "'blacklist'",
+    };
+    let sql = format!(
+        "SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
 FROM submission s
 LEFT JOIN video v ON v.submission_id = s.id
-INNER JOIN upper_auto_manage_policy p ON p.submission_id = s.id
 WHERE s.enabled = 0
-  AND p.policy = 'normal'
-  AND p.source = 'auto'
-GROUP BY s.id, s.upper_id, s.upper_name";
+  AND NOT EXISTS (
+    SELECT 1 FROM upper_auto_manage_policy p
+    WHERE p.submission_id = s.id AND p.policy IN ({excluded})
+  )
+GROUP BY s.id, s.upper_id, s.upper_name"
+    );
     let candidates =
         SubmissionActivity::find_by_statement(Statement::from_string(connection.get_database_backend(), sql))
             .all(connection)
@@ -759,39 +781,30 @@ async fn check_disabled_upper(
     }
 }
 
-/// 在同一事务内更新 submission.enabled 与对应 policy，避免出现
-/// 「enabled 已被禁用但 policy 未写入成功」导致 UP 永久卡在禁用态的孤立状态。
-/// 通过 lock_for_submission 与 API 写入串行，避免并发覆盖。
-async fn disable_submission_with_policy(
+async fn load_policy_for_submission(
     connection: &DatabaseConnection,
     submission_id: i32,
-    policy: UpperManagePolicy,
-    source: UpperManageSource,
-    reason: Option<String>,
-) -> Result<()> {
+) -> Result<Option<UpperManagePolicy>> {
+    Ok(upper_auto_manage_policy::Entity::find_by_id(submission_id)
+        .one(connection)
+        .await?
+        .map(|p| p.policy))
+}
+
+async fn disable_submission(connection: &DatabaseConnection, submission_id: i32) -> Result<()> {
     let lock = lock_for_submission(submission_id);
     let _guard = lock.lock().await;
-    let txn = connection.begin().await?;
     submission::ActiveModel {
         id: Set(submission_id),
         enabled: Set(false),
         ..Default::default()
     }
-    .update(&txn)
+    .update(connection)
     .await?;
-    upsert_policy_txn(&txn, submission_id, policy, source, reason).await?;
-    txn.commit().await?;
     Ok(())
 }
 
-/// 在同一事务内启用 submission 并写入对应 policy，语义与 disable 对称
-async fn enable_submission_with_policy(
-    connection: &DatabaseConnection,
-    submission_id: i32,
-    policy: UpperManagePolicy,
-    source: UpperManageSource,
-    reason: Option<String>,
-) -> Result<()> {
+async fn enable_submission(connection: &DatabaseConnection, submission_id: i32) -> Result<()> {
     let lock = lock_for_submission(submission_id);
     let _guard = lock.lock().await;
     let txn = connection.begin().await?;
@@ -802,7 +815,33 @@ async fn enable_submission_with_policy(
     }
     .update(&txn)
     .await?;
-    upsert_policy_txn(&txn, submission_id, policy, source, reason).await?;
+    if let Some(p) = upper_auto_manage_policy::Entity::find_by_id(submission_id)
+        .one(&txn)
+        .await?
+        && p.policy == UpperManagePolicy::Normal
+    {
+        upper_auto_manage_policy::Entity::delete_by_id(submission_id)
+            .exec(&txn)
+            .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+async fn recover_banned_submission(connection: &DatabaseConnection, submission_id: i32) -> Result<()> {
+    let lock = lock_for_submission(submission_id);
+    let _guard = lock.lock().await;
+    let txn = connection.begin().await?;
+    submission::ActiveModel {
+        id: Set(submission_id),
+        enabled: Set(true),
+        ..Default::default()
+    }
+    .update(&txn)
+    .await?;
+    upper_auto_manage_policy::Entity::delete_by_id(submission_id)
+        .exec(&txn)
+        .await?;
     txn.commit().await?;
     Ok(())
 }
@@ -1000,31 +1039,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disable_submission_writes_policy_atomically() {
+    async fn automatic_disable_only_changes_enabled_without_normal_policy() {
         let (_dir, conn) = setup_test_db().await;
-        let sid = insert_submission(&conn, 100, "alice", true).await;
-        // 没有 video 行：last_pubtime=None，巡检 phase 1 会跳过；
-        // 这里直接验证原子化写函数本身
-        disable_submission_with_policy(&conn, sid, Policy::Normal, Source::Auto, Some("test".to_string()))
-            .await
-            .expect("disable");
-        assert!(!is_submission_enabled(&conn, sid).await.unwrap(), "submission 应被禁用");
-        let p = load_policy(&conn, sid).await.expect("policy 行必须存在");
-        assert_eq!(p.policy, Policy::Normal);
-        assert_eq!(p.source, Source::Auto);
+        let sid = insert_submission(&conn, 99, "auto", true).await;
+        disable_submission(&conn, sid).await.expect("disable");
+        assert!(!is_submission_enabled(&conn, sid).await.unwrap());
+        assert!(load_policy(&conn, sid).await.is_none());
     }
 
     #[tokio::test]
-    async fn enable_submission_writes_policy_atomically() {
+    async fn scheduled_recheck_includes_manual_disabled_and_whitelist_but_not_banned() {
         let (_dir, conn) = setup_test_db().await;
-        let sid = insert_submission(&conn, 101, "bob", false).await;
-        enable_submission_with_policy(&conn, sid, Policy::Normal, Source::Auto, Some("test".to_string()))
+        let sid_plain = insert_submission(&conn, 98, "plain", false).await;
+        let sid_white = insert_submission(&conn, 97, "white", false).await;
+        let sid_banned = insert_submission(&conn, 96, "banned", false).await;
+        upsert_policy(&conn, sid_white, Policy::Whitelist, Source::Manual, None)
             .await
-            .expect("enable");
-        assert!(is_submission_enabled(&conn, sid).await.unwrap(), "submission 应被启用");
-        let p = load_policy(&conn, sid).await.expect("policy 行必须存在");
-        assert_eq!(p.policy, Policy::Normal);
-        assert_eq!(p.source, Source::Auto);
+            .unwrap();
+        upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
+            .await
+            .unwrap();
+        let ids = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.submission_id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&sid_plain));
+        assert!(ids.contains(&sid_white));
+        assert!(!ids.contains(&sid_banned));
+    }
+
+    #[tokio::test]
+    async fn manual_recheck_includes_banned_but_not_blacklist() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid_banned = insert_submission(&conn, 95, "banned", false).await;
+        let sid_black = insert_submission(&conn, 94, "black", false).await;
+        upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
+            .await
+            .unwrap();
+        upsert_policy(&conn, sid_black, Policy::Blacklist, Source::Manual, None)
+            .await
+            .unwrap();
+        let ids = fetch_disabled_for_recheck(&conn, InspectionTrigger::Manual)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.submission_id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&sid_banned));
+        assert!(!ids.contains(&sid_black));
+    }
+
+    #[tokio::test]
+    async fn recovered_submission_is_enabled_and_normal_policy_is_removed() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 93, "recover", false).await;
+        upsert_policy(&conn, sid, Policy::Normal, Source::Auto, None)
+            .await
+            .unwrap();
+        enable_submission(&conn, sid).await.expect("enable");
+        assert!(is_submission_enabled(&conn, sid).await.unwrap());
+        assert!(load_policy(&conn, sid).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn recovered_banned_submission_clears_banned_and_enables() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 92, "unbanned", false).await;
+        upsert_policy(&conn, sid, Policy::Banned, Source::Auto, None)
+            .await
+            .unwrap();
+        recover_banned_submission(&conn, sid).await.expect("recover");
+        assert!(is_submission_enabled(&conn, sid).await.unwrap());
+        assert!(load_policy(&conn, sid).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_disabled_submission_does_not_create_normal_policy() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid = insert_submission(&conn, 91, "manual", true).await;
+        disable_submission(&conn, sid).await.expect("disable");
+        assert!(load_policy(&conn, sid).await.is_none());
     }
 
     #[tokio::test]
@@ -1142,7 +1238,9 @@ mod tests {
         upsert_policy(&conn, sid, Policy::Normal, Source::Auto, None)
             .await
             .expect("seed auto normal");
-        let candidates = fetch_disabled_for_recheck(&conn).await.expect("query");
+        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+            .await
+            .expect("query");
         assert!(
             candidates.iter().any(|c| c.submission_id == sid),
             "auto 来源的 normal policy 必须被恢复巡检命中"
@@ -1157,10 +1255,12 @@ mod tests {
         upsert_policy(&conn, sid, Policy::Normal, Source::Manual, Some("用户手动".to_string()))
             .await
             .expect("seed manual normal");
-        let candidates = fetch_disabled_for_recheck(&conn).await.expect("query");
+        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+            .await
+            .expect("query");
         assert!(
-            !candidates.iter().any(|c| c.submission_id == sid),
-            "manual 来源的 normal policy 不应进入恢复巡检"
+            candidates.iter().any(|c| c.submission_id == sid),
+            "manual normal policy 也应进入恢复巡检"
         );
     }
 
@@ -1179,9 +1279,11 @@ mod tests {
         upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
             .await
             .unwrap();
-        let candidates = fetch_disabled_for_recheck(&conn).await.expect("query");
+        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+            .await
+            .expect("query");
         let ids: Vec<i32> = candidates.iter().map(|c| c.submission_id).collect();
-        assert!(!ids.contains(&sid_w), "whitelist 不应进入恢复巡检");
+        assert!(ids.contains(&sid_w), "whitelist 应进入恢复巡检");
         assert!(!ids.contains(&sid_b), "blacklist 不应进入恢复巡检");
         assert!(!ids.contains(&sid_banned), "banned(封禁观察) 不应进入恢复巡检");
     }
@@ -1245,24 +1347,14 @@ mod tests {
             };
             let days = (now - last_pub).num_days();
             if days > opt.inactive_threshold_days {
-                disable_submission_with_policy(
-                    &conn,
-                    cand.submission_id,
-                    Policy::Normal,
-                    Source::Auto,
-                    Some(format!("{} 天未更新", days)),
-                )
-                .await
-                .expect("disable");
+                disable_submission(&conn, cand.submission_id).await.expect("disable");
                 stats.disabled += 1;
             }
         }
         assert_eq!(stats.checked, 1);
         assert_eq!(stats.disabled, 1);
         assert!(!is_submission_enabled(&conn, sid).await.unwrap(), "应被自动禁用");
-        let p = load_policy(&conn, sid).await.unwrap();
-        assert_eq!(p.policy, Policy::Normal);
-        assert_eq!(p.source, Source::Auto);
+        assert!(load_policy(&conn, sid).await.is_none());
     }
 
     /// 模拟「阶段二收到 outcome 后处理」的逻辑：Recovered/Banned/StillInactive
@@ -1282,10 +1374,9 @@ mod tests {
             last_pubtime: None,
         };
         // 模拟 apply_recovered_outcome
-        enable_submission_with_policy(&conn, sid_r, Policy::Normal, Source::Auto, Some("检测到新投稿".into()))
-            .await
-            .unwrap();
+        enable_submission(&conn, sid_r).await.unwrap();
         assert!(is_submission_enabled(&conn, sid_r).await.unwrap());
+        assert!(load_policy(&conn, sid_r).await.is_none());
         // Banned：启用 → 写 blacklist auto，enabled 保持
         let sid_b = insert_submission(&conn, 201, "ban", true).await;
         upsert_policy(&conn, sid_b, Policy::Whitelist, Source::Manual, None)
@@ -1377,7 +1468,9 @@ mod tests {
         let inactive = fetch_inactive_candidates(&conn).await.unwrap();
         assert!(!inactive.iter().any(|c| c.submission_id == sid));
         // banned UP 不应进入恢复巡检候选（验证不会被自动启用）
-        let recheck = fetch_disabled_for_recheck(&conn).await.unwrap();
+        let recheck = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+            .await
+            .unwrap();
         assert!(!recheck.iter().any(|c| c.submission_id == sid));
     }
 

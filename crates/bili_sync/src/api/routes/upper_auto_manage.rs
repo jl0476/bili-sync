@@ -190,7 +190,9 @@ async fn get_status(
 }
 
 async fn trigger_run() -> Result<ApiResponse<bool>, ApiError> {
-    let queued = UpperAutoManageTaskManager::get().run_once().await?;
+    let queued = UpperAutoManageTaskManager::get()
+        .run_once_with_trigger(crate::task::InspectionTrigger::Manual)
+        .await?;
     Ok(ApiResponse::ok(queued))
 }
 
