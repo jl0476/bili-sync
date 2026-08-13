@@ -685,13 +685,14 @@ async fn check_disabled_upper(
                     upper_name: cand.upper_name.clone(),
                 });
             }
-            let latest_pubdate = match vlist[0]["pubdate"].as_i64() {
+            // 字段命名历史：space/wbi/arc/search 接口在正常下载流程中只反序列化 `created` 为 ctime
+// （见 bilibili/mod.rs::VideoInfo::Submission），`pubdate` 在该接口下不存在。
+// 这里优先用 `created`，与正常下载行为一致；找不到才退到 `pubdate` 兼容旧版本。
+            let latest_pubdate = match vlist[0]["created"].as_i64().or_else(|| vlist[0]["pubdate"].as_i64()) {
                 Some(ts) => ts,
                 None => {
-                    // 数据异常（字段缺失/类型错误）只影响这一个 UP，不应中断整轮巡检。
-                    // 按「仍不活跃」处理：下一轮再试；同时打印原始片段便于诊断。
                     warn!(
-                        "解析 UP「{}」({}) 最新投稿 pubdate 失败，按不活跃处理；raw[0]={}",
+                        "解析 UP「{}」({}) 最新投稿 created/pubdate 失败，按不活跃处理；raw[0]={}",
                         cand.upper_name, cand.upper_id, vlist[0]
                     );
                     return Ok(CheckOutcome {
