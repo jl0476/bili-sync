@@ -71,6 +71,16 @@ impl BiliError {
         }
         false
     }
+
+    /// 判断错误是否表示视频不可访问（不存在 / 稿件不可见），应标记为 invalid 跳过后续扫描。
+    /// - `-404`：视频不存在（已删除）
+    /// - `62002`：稿件不可见（UP 主设为私享 / 审核中 / 被删除等）
+    pub fn is_video_inaccessible(&self) -> bool {
+        if let BiliError::ErrorResponse { code, .. } = self {
+            return *code == -404 || *code == 62002;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +142,24 @@ mod tests {
         assert!(!make(None).is_upper_banned());
         assert!(!BiliError::VideoStreamsEmpty.is_upper_permanently_gone());
         assert!(!BiliError::VideoStreamsEmpty.is_upper_banned());
+    }
+
+    #[test]
+    fn test_is_video_inaccessible() {
+        let make = |code: i64| BiliError::ErrorResponse {
+            code,
+            message: Some("test".to_string()),
+            response: String::new(),
+        };
+        // 不存在 / 不可见 → 应标记 invalid
+        assert!(make(-404).is_video_inaccessible());
+        assert!(make(62002).is_video_inaccessible());
+        // 其他错误码不应标记 invalid
+        assert!(!make(-509).is_video_inaccessible()); // 限频
+        assert!(!make(-352).is_video_inaccessible()); // 风控
+        assert!(!make(0).is_video_inaccessible());
+        // 非 ErrorResponse 变体
+        assert!(!BiliError::VideoStreamsEmpty.is_video_inaccessible());
+        assert!(!BiliError::RiskControlOccurred("x".to_string()).is_video_inaccessible());
     }
 }

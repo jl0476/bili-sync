@@ -141,7 +141,10 @@ pub async fn fetch_video_details(
                         "获取视频 {} - {} 的详细信息失败，错误为：{:#}",
                         &video_model.bvid, &video_model.name, e
                     );
-                    if let Some(BiliError::ErrorResponse { code: -404, .. }) = e.downcast_ref::<BiliError>() {
+                    if let Some(bili_err) = e.downcast_ref::<BiliError>()
+                        && bili_err.is_video_inaccessible()
+                    {
+                        info!("视频 {} - {} 不可访问，标记为 invalid 跳过后续扫描", &video_model.bvid, &video_model.name);
                         Some(VideoDetailUpdate::Invalid(video_model.id))
                     } else {
                         None
