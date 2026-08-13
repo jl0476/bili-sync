@@ -491,8 +491,7 @@
 					value={actionFilter}
 					onchange={(e) => {
 						actionFilter = (e.currentTarget as HTMLSelectElement).value as
-							| UpperManageActionType
-							| '';
+							UpperManageActionType | '';
 						onActionFilterChange();
 					}}
 				>
