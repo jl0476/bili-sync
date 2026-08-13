@@ -30,12 +30,11 @@ mod built_info {
 }
 
 pub fn version() -> Cow<'static, str> {
+    let pkg = built_info::PKG_VERSION;
     match (built_info::GIT_VERSION, built_info::GIT_DIRTY) {
-        (Some(git_version), Some(true)) => {
-            Cow::Owned(format!("{} ({}-dirty)", built_info::PKG_VERSION, git_version))
-        }
-        (Some(git_version), _) => Cow::Owned(format!("{} ({})", built_info::PKG_VERSION, git_version)),
-        _ => Cow::Borrowed(built_info::PKG_VERSION),
+        (Some(git), Some(true)) => Cow::Owned(format!("{pkg} ({git}-dirty)")),
+        (Some(git), _) => Cow::Owned(format!("{pkg} ({git})")),
+        _ => Cow::Borrowed(pkg),
     }
 }
 
