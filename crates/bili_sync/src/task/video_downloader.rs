@@ -373,9 +373,10 @@ async fn finish_download_run(
     Ok(())
 }
 
-/// 删除超过保留期（RUN_RETENTION_DAYS）的下载任务运行记录，返回删除行数
+/// 删除超过保留期（RUN_RETENTION_DAYS）的下载任务运行记录，返回删除行数。
+/// started_at 以本地时间写入（见 create_download_run），cutoff 保持同一时基。
 async fn cleanup_expired_download_runs(connection: &DatabaseConnection) -> Result<u64> {
-    let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
+    let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
     Ok(download_run::Entity::delete_many()
         .filter(download_run::Column::StartedAt.lt(cutoff))
         .exec(connection)

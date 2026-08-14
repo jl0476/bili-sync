@@ -645,9 +645,10 @@ async fn run_inspection_inner(
     Ok(stats)
 }
 
-/// 删除超过保留期（RUN_RETENTION_DAYS）的巡检运行记录，返回删除行数
+/// 删除超过保留期（RUN_RETENTION_DAYS）的巡检运行记录，返回删除行数。
+/// started_at 以本地时间写入（见 run_inspection），cutoff 保持同一时基。
 async fn cleanup_expired_upper_auto_manage_runs(connection: &DatabaseConnection) -> Result<u64> {
-    let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
+    let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
     Ok(upper_auto_manage_run::Entity::delete_many()
         .filter(upper_auto_manage_run::Column::StartedAt.lt(cutoff))
         .exec(connection)
@@ -746,7 +747,7 @@ async fn check_disabled_upper(
     cand: &SubmissionActivity,
 ) -> Result<CheckOutcome> {
     // 选择数据源：动态 API UP 走 Dynamic，其他走 Submission。
-    // 两种 stream 的 Item 类型一致（`Result<VideoInfo>`），探活只需取第一条的 release_datetime。
+    // 两种 stream 的 Item 类型一致（`Result<VideoInfo>`）。
     let mut stream = if cand.use_dynamic_api {
         Box::pin(Dynamic::new(client, cand.upper_id.to_string(), credential).into_video_stream())
             as std::pin::Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>
@@ -754,9 +755,35 @@ async fn check_disabled_upper(
         Box::pin(Submission::new(client, cand.upper_id.to_string(), credential).into_video_stream())
             as std::pin::Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>
     };
-    match stream.next().await {
-        Some(Ok(video_info)) => {
-            let latest_pubtime = video_info.release_datetime().naive_utc();
+    let (latest, err) = probe_latest_pubtime(stream.as_mut()).await;
+    if let Some(e) = err {
+        if let Some(bili_err) = e.downcast_ref::<BiliError>() {
+            // 风控优先：中断整轮，避免连环触发
+            if bili_err.is_risk_control_related() {
+                bail!(e);
+            }
+            // 删号/注销/不存在 → 永久不可恢复，后续写 Blacklist
+            if bili_err.is_upper_permanently_gone() {
+                return Ok(CheckOutcome {
+                    kind: CheckOutcomeKind::Gone(bili_err.to_string()),
+                    submission_id: cand.submission_id,
+                    upper_name: cand.upper_name.clone(),
+                });
+            }
+            // 封禁/冻结 → 观察态，后续写 Banned（不进黑名单，不动 enabled）
+            if bili_err.is_upper_banned() {
+                return Ok(CheckOutcome {
+                    kind: CheckOutcomeKind::BannedObservation(bili_err.to_string()),
+                    submission_id: cand.submission_id,
+                    upper_name: cand.upper_name.clone(),
+                });
+            }
+        }
+        // 其他错误向上传递，由调用方记 warn 跳过
+        return Err(e);
+    }
+    match latest {
+        Some(latest_pubtime) => {
             let recovered = match cand.last_pubtime {
                 Some(known) => latest_pubtime > known,
                 None => true,
@@ -771,32 +798,6 @@ async fn check_disabled_upper(
                 upper_name: cand.upper_name.clone(),
             })
         }
-        Some(Err(e)) => {
-            if let Some(bili_err) = e.downcast_ref::<BiliError>() {
-                // 风控优先：中断整轮，避免连环触发
-                if bili_err.is_risk_control_related() {
-                    bail!(e);
-                }
-                // 删号/注销/不存在 → 永久不可恢复，后续写 Blacklist
-                if bili_err.is_upper_permanently_gone() {
-                    return Ok(CheckOutcome {
-                        kind: CheckOutcomeKind::Gone(bili_err.to_string()),
-                        submission_id: cand.submission_id,
-                        upper_name: cand.upper_name.clone(),
-                    });
-                }
-                // 封禁/冻结 → 观察态，后续写 Banned（不进黑名单，不动 enabled）
-                if bili_err.is_upper_banned() {
-                    return Ok(CheckOutcome {
-                        kind: CheckOutcomeKind::BannedObservation(bili_err.to_string()),
-                        submission_id: cand.submission_id,
-                        upper_name: cand.upper_name.clone(),
-                    });
-                }
-            }
-            // 其他错误向上传递，由调用方记 warn 跳过
-            Err(e)
-        }
         // stream 结束且无错误：UP 无任何可拉取的视频（投稿/动态皆空），视为仍不活跃
         None => Ok(CheckOutcome {
             kind: CheckOutcomeKind::StillInactive,
@@ -804,6 +805,34 @@ async fn check_disabled_upper(
             upper_name: cand.upper_name.clone(),
         }),
     }
+}
+
+/// 探活采样条数：动态 API 单页最多 12 条，多取 1 条容错。
+/// 投稿 API 按发布时间倒序，首条即最新，采样不影响结果。
+const PROBE_SAMPLE_SIZE: usize = 13;
+
+/// 从视频流采样前 [`PROBE_SAMPLE_SIZE`] 条，返回最大发布时间与首个错误（若有）。
+///
+/// 动态 API 的流第一条可能是 UP 置顶的旧视频（adapter::submission 对 idx==0 有同样的
+/// 置顶特判），不能只看第一条，否则置顶旧视频会遮蔽其后更新的动态，导致探活误判。
+async fn probe_latest_pubtime<S>(mut stream: S) -> (Option<DateTime>, Option<anyhow::Error>)
+where
+    S: Stream<Item = Result<VideoInfo>> + Unpin,
+{
+    let mut latest = None;
+    let mut sampled = 0;
+    while sampled < PROBE_SAMPLE_SIZE {
+        match stream.next().await {
+            Some(Ok(video_info)) => {
+                let pubtime = video_info.release_datetime().naive_utc();
+                latest = Some(latest.map_or(pubtime, |max: DateTime| max.max(pubtime)));
+                sampled += 1;
+            }
+            Some(Err(e)) => return (latest, Some(e)),
+            None => return (latest, None),
+        }
+    }
+    (latest, None)
 }
 
 async fn load_policy_for_submission(
@@ -1243,6 +1272,54 @@ mod tests {
         assert_eq!(p.policy, Policy::Blacklist);
         assert_eq!(p.source, Source::Auto);
         assert_eq!(p.reason.as_deref(), Some("r2"));
+    }
+
+    /// 构造一条动态视频信息（探活采样测试用）
+    fn dynamic_video(bvid: &str, pubtime: chrono::NaiveDateTime) -> VideoInfo {
+        VideoInfo::Dynamic {
+            title: format!("video {bvid}"),
+            bvid: bvid.to_string(),
+            desc: String::new(),
+            cover: String::new(),
+            pubtime: pubtime.and_utc(),
+        }
+    }
+
+    /// 置顶旧视频在流的第一条，其后有更新的动态：采样必须取到新动态的时间
+    #[tokio::test]
+    async fn probe_skips_pinned_old_video_and_takes_max() {
+        let old = (Utc::now() - chrono::Duration::days(365)).naive_utc();
+        let recent = (Utc::now() - chrono::Duration::days(3)).naive_utc();
+        let stream = futures::stream::iter(vec![
+            Ok(dynamic_video("BVpinned", old)),
+            Ok(dynamic_video("BVnew", recent)),
+        ]);
+        let (latest, err) = probe_latest_pubtime(stream).await;
+        assert!(err.is_none());
+        assert_eq!(latest, Some(recent), "置顶旧视频不应遮蔽更新的动态");
+    }
+
+    /// 空流：无视频可拉取 → (None, None)
+    #[tokio::test]
+    async fn probe_empty_stream_returns_none() {
+        let stream = futures::stream::iter(Vec::<Result<VideoInfo>>::new());
+        let (latest, err) = probe_latest_pubtime(stream).await;
+        assert!(err.is_none());
+        assert_eq!(latest, None);
+    }
+
+    /// 流中途出错：返回已采样的最大时间与错误
+    #[tokio::test]
+    async fn probe_returns_error_with_partial_max() {
+        let t1 = (Utc::now() - chrono::Duration::days(10)).naive_utc();
+        let stream = futures::stream::iter(vec![
+            Ok(dynamic_video("BV1", t1)),
+            Err(anyhow::anyhow!("network error")),
+            Ok(dynamic_video("BV2", Utc::now().naive_utc())),
+        ]);
+        let (latest, err) = probe_latest_pubtime(stream).await;
+        assert!(err.is_some(), "错误应被返回");
+        assert_eq!(latest, Some(t1), "错误前的采样结果不应丢失");
     }
 
     #[tokio::test]

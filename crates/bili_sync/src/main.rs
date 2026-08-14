@@ -92,13 +92,13 @@ fn spawn_task(
 
 /// 初始化日志系统、打印欢迎信息，初始化数据库连接和全局配置
 async fn init() -> Result<(Arc<BiliClient>, DatabaseConnection, LogHelper)> {
-    // musl 静态二进制默认不读 TZ，需要主动调用 time::UtcOffset::current_local_offset
-    // 让 chrono::Local 后续能正确返回服务器本地时间（Dockerfile 的 ENV TZ=Asia/Shanghai 才生效）。
-    // 见 https://github.com/time-rs/time/blob/master/time/src/utc_offset.rs
-    match time::UtcOffset::current_local_offset() {
-        Ok(offset) => info!("时区偏移：UTC{:?}", offset.as_hms()),
-        Err(e) => warn!("获取本地时区偏移失败（将按 UTC 处理）：{}", e),
-    }
+    // 打印本地时间便于部署时核对容器 TZ 是否生效（chrono::Local 读取 TZ 与 /etc/localtime）
+    let local_now = chrono::Local::now();
+    info!(
+        "服务器本地时间：{}（UTC{}）",
+        local_now.format("%Y-%m-%d %H:%M:%S"),
+        local_now.format("%:z")
+    );
 
     let (tx, _rx) = tokio::sync::broadcast::channel(30);
     let log_history = Arc::new(RwLock::new(VecDeque::with_capacity(MAX_HISTORY_LOGS + 1)));
