@@ -824,11 +824,7 @@ fn decide_recovery(latest: Option<ProbeLatest>, bvid_in_local: bool) -> CheckOut
 }
 
 /// 该订阅的本地视频中是否已存在指定 bvid
-async fn video_exists_in_submission(
-    connection: &DatabaseConnection,
-    submission_id: i32,
-    bvid: &str,
-) -> Result<bool> {
+async fn video_exists_in_submission(connection: &DatabaseConnection, submission_id: i32, bvid: &str) -> Result<bool> {
     Ok(video::Entity::find()
         .filter(video::Column::SubmissionId.eq(submission_id))
         .filter(video::Column::Bvid.eq(bvid))
@@ -1395,10 +1391,7 @@ mod tests {
     /// 探活无结果（无任何可拉取视频）→ 仍不活跃
     #[tokio::test]
     async fn decide_recovery_none_probe_is_still_inactive() {
-        assert!(matches!(
-            decide_recovery(None, false),
-            CheckOutcomeKind::StillInactive
-        ));
+        assert!(matches!(decide_recovery(None, false), CheckOutcomeKind::StillInactive));
     }
 
     /// 本地库按 submission_id + bvid 查存在性：命中本订阅的视频才算存在，
