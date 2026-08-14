@@ -8,14 +8,14 @@ use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageS
 use bili_sync_entity::upper_auto_manage_run::RunStatus;
 use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run};
 use dashmap::DashMap;
-use futures::stream::{self, TryStreamExt};
+use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm::{DatabaseConnection, FromQueryResult, Statement, TransactionTrait};
 use tokio::sync::{Mutex, OnceCell, watch};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::bilibili::{self, BiliClient, BiliError, Credential, Submission};
+use crate::bilibili::{self, BiliClient, BiliError, Credential, Dynamic, Submission, VideoInfo};
 use crate::config::{Config, Trigger, VersionedConfig};
 use crate::task::{TaskStatus, TaskTrigger};
 use crate::utils::notify::error_and_notify;
@@ -661,12 +661,16 @@ struct SubmissionActivity {
     upper_id: i64,
     upper_name: String,
     last_pubtime: Option<DateTime>,
+    /// 是否使用动态 API 拉取视频。动态 API UP 复查（阶段二）必须走 Dynamic::into_video_stream，
+    /// 否则会被误判为「仍不活跃」永远无法自动恢复。
+    use_dynamic_api: bool,
 }
 
 /// 查询启用态、且未被列入白名单/黑名单/封禁观察的 submission 及其最新投稿时间
 async fn fetch_inactive_candidates(connection: &DatabaseConnection) -> Result<Vec<SubmissionActivity>> {
     let sql = "
-SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
+SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name,
+       MAX(v.pubtime) AS last_pubtime, s.use_dynamic_api AS use_dynamic_api
 FROM submission s
 LEFT JOIN video v ON v.submission_id = s.id
 WHERE s.enabled = 1
@@ -674,7 +678,7 @@ WHERE s.enabled = 1
     SELECT 1 FROM upper_auto_manage_policy p
     WHERE p.submission_id = s.id AND p.policy IN ('whitelist', 'blacklist', 'banned')
   )
-GROUP BY s.id, s.upper_id, s.upper_name";
+GROUP BY s.id, s.upper_id, s.upper_name, s.use_dynamic_api";
     let candidates =
         SubmissionActivity::find_by_statement(Statement::from_string(connection.get_database_backend(), sql))
             .all(connection)
@@ -697,7 +701,8 @@ async fn fetch_disabled_for_recheck(
         TaskTrigger::Manual => "'blacklist'",
     };
     let sql = format!(
-        "SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
+        "SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name,
+       MAX(v.pubtime) AS last_pubtime, s.use_dynamic_api AS use_dynamic_api
 FROM submission s
 LEFT JOIN video v ON v.submission_id = s.id
 WHERE s.enabled = 0
@@ -705,7 +710,7 @@ WHERE s.enabled = 0
     SELECT 1 FROM upper_auto_manage_policy p
     WHERE p.submission_id = s.id AND p.policy IN ({excluded})
   )
-GROUP BY s.id, s.upper_id, s.upper_name"
+GROUP BY s.id, s.upper_id, s.upper_name, s.use_dynamic_api"
     );
     let candidates =
         SubmissionActivity::find_by_statement(Statement::from_string(connection.get_database_backend(), sql))
@@ -730,55 +735,28 @@ enum CheckOutcomeKind {
     BannedObservation(String),
 }
 
-/// 主动拉取禁用态 UP 的最新投稿，判定恢复 / 仍不活跃 / 永久不可用 / 封禁观察
+/// 主动拉取禁用态 UP 的最新投稿，判定恢复 / 仍不活跃 / 永久不可用 / 封禁观察。
+///
+/// 通过 `Submission`/`Dynamic` 的 `into_video_stream` 复用与正常下载完全相同的拉取与解析逻辑，
+/// 自动按 `use_dynamic_api` 走投稿 API 或动态 API——避免对动态 API 专用的 UP 永远
+/// 被判定为"仍不活跃"导致无法自动恢复。
 async fn check_disabled_upper(
     client: &BiliClient,
     credential: &Credential,
     cand: &SubmissionActivity,
 ) -> Result<CheckOutcome> {
-    let sub = Submission::new(client, cand.upper_id.to_string(), credential);
-    match sub.get_videos(1).await {
-        Ok(videos_json) => {
-            let vlist = &videos_json["data"]["list"]["vlist"];
-            if vlist.as_array().is_none_or(|a| a.is_empty()) {
-                // UP 无投稿（新号或投稿全删），视为仍不活跃
-                return Ok(CheckOutcome {
-                    kind: CheckOutcomeKind::StillInactive,
-                    submission_id: cand.submission_id,
-                    upper_name: cand.upper_name.clone(),
-                });
-            }
-            // 字段命名历史：space/wbi/arc/search 接口在正常下载流程中只反序列化 `created` 为 ctime
-            // （见 bilibili/mod.rs::VideoInfo::Submission），`pubdate` 在该接口下不存在。
-            // 这里优先用 `created`，与正常下载行为一致；找不到才退到 `pubdate` 兼容旧版本。
-            let latest_pubdate = match vlist[0]["created"].as_i64().or_else(|| vlist[0]["pubdate"].as_i64()) {
-                Some(ts) => ts,
-                None => {
-                    warn!(
-                        "解析 UP「{}」({}) 最新投稿 created/pubdate 失败，按不活跃处理；raw[0]={}",
-                        cand.upper_name, cand.upper_id, vlist[0]
-                    );
-                    return Ok(CheckOutcome {
-                        kind: CheckOutcomeKind::StillInactive,
-                        submission_id: cand.submission_id,
-                        upper_name: cand.upper_name.clone(),
-                    });
-                }
-            };
-            let latest_pubtime = match chrono::DateTime::from_timestamp(latest_pubdate, 0) {
-                Some(dt) => dt.naive_utc(),
-                None => {
-                    warn!(
-                        "UP「{}」({}) pubdate={} 超出合法时间戳范围，按不活跃处理",
-                        cand.upper_name, cand.upper_id, latest_pubdate
-                    );
-                    return Ok(CheckOutcome {
-                        kind: CheckOutcomeKind::StillInactive,
-                        submission_id: cand.submission_id,
-                        upper_name: cand.upper_name.clone(),
-                    });
-                }
-            };
+    // 选择数据源：动态 API UP 走 Dynamic，其他走 Submission。
+    // 两种 stream 的 Item 类型一致（`Result<VideoInfo>`），探活只需取第一条的 release_datetime。
+    let mut stream = if cand.use_dynamic_api {
+        Box::pin(Dynamic::new(client, cand.upper_id.to_string(), credential).into_video_stream())
+            as std::pin::Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>
+    } else {
+        Box::pin(Submission::new(client, cand.upper_id.to_string(), credential).into_video_stream())
+            as std::pin::Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>
+    };
+    match stream.next().await {
+        Some(Ok(video_info)) => {
+            let latest_pubtime = video_info.release_datetime().naive_utc();
             let recovered = match cand.last_pubtime {
                 Some(known) => latest_pubtime > known,
                 None => true,
@@ -793,7 +771,7 @@ async fn check_disabled_upper(
                 upper_name: cand.upper_name.clone(),
             })
         }
-        Err(e) => {
+        Some(Err(e)) => {
             if let Some(bili_err) = e.downcast_ref::<BiliError>() {
                 // 风控优先：中断整轮，避免连环触发
                 if bili_err.is_risk_control_related() {
@@ -819,6 +797,12 @@ async fn check_disabled_upper(
             // 其他错误向上传递，由调用方记 warn 跳过
             Err(e)
         }
+        // stream 结束且无错误：UP 无任何可拉取的视频（投稿/动态皆空），视为仍不活跃
+        None => Ok(CheckOutcome {
+            kind: CheckOutcomeKind::StillInactive,
+            submission_id: cand.submission_id,
+            upper_name: cand.upper_name.clone(),
+        }),
     }
 }
 
@@ -1007,12 +991,22 @@ mod tests {
     }
 
     async fn insert_submission(conn: &DatabaseConnection, upper_id: i64, name: &str, enabled: bool) -> i32 {
+        insert_submission_with_dynamic_api(conn, upper_id, name, enabled, false).await
+    }
+
+    async fn insert_submission_with_dynamic_api(
+        conn: &DatabaseConnection,
+        upper_id: i64,
+        name: &str,
+        enabled: bool,
+        use_dynamic_api: bool,
+    ) -> i32 {
         let am = submission::ActiveModel {
             upper_id: Set(upper_id),
             upper_name: Set(name.to_string()),
             path: Set(format!("/tmp/{}", name)),
             created_at: Set(Utc::now().to_rfc3339()),
-            use_dynamic_api: Set(false),
+            use_dynamic_api: Set(use_dynamic_api),
             latest_row_at: Set(Utc::now().naive_utc()),
             enabled: Set(enabled),
             ..Default::default()
@@ -1252,6 +1246,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_candidates_carries_use_dynamic_api_flag() {
+        let (_dir, conn) = setup_test_db().await;
+        // 阶段一查 enabled=1 的 submission；阶段二查 enabled=0 的。各建一个 dynamic / normal。
+        let sid_dyn_p1 = insert_submission_with_dynamic_api(&conn, 700, "dyn_up_p1", true, true).await;
+        let sid_normal_p1 = insert_submission_with_dynamic_api(&conn, 701, "normal_up_p1", true, false).await;
+        let sid_dyn_p2 = insert_submission_with_dynamic_api(&conn, 702, "dyn_up_p2", false, true).await;
+        let sid_normal_p2 = insert_submission_with_dynamic_api(&conn, 703, "normal_up_p2", false, false).await;
+        // 阶段一应同时带上 use_dynamic_api
+        let p1: Vec<i32> = fetch_inactive_candidates(&conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.submission_id)
+            .collect();
+        assert!(p1.contains(&sid_dyn_p1) && p1.contains(&sid_normal_p1));
+        let p1_dyn = fetch_inactive_candidates(&conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.submission_id == sid_dyn_p1)
+            .unwrap();
+        let p1_normal = fetch_inactive_candidates(&conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.submission_id == sid_normal_p1)
+            .unwrap();
+        assert!(p1_dyn.use_dynamic_api);
+        assert!(!p1_normal.use_dynamic_api);
+        // 阶段二同理
+        let p2: Vec<i32> = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.submission_id)
+            .collect();
+        assert!(p2.contains(&sid_dyn_p2) && p2.contains(&sid_normal_p2));
+        let p2_dyn = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.submission_id == sid_dyn_p2)
+            .unwrap();
+        let p2_normal = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.submission_id == sid_normal_p2)
+            .unwrap();
+        assert!(p2_dyn.use_dynamic_api);
+        assert!(!p2_normal.use_dynamic_api);
+    }
+
+    #[tokio::test]
     async fn fetch_disabled_for_recheck_includes_auto_source_normal_policy() {
         let (_dir, conn) = setup_test_db().await;
         let sid = insert_submission(&conn, 105, "frank", false).await;
@@ -1454,6 +1502,7 @@ mod tests {
             upper_id: 200,
             upper_name: "recover".into(),
             last_pubtime: None,
+            use_dynamic_api: false,
         };
         // 模拟 apply_recovered_outcome
         enable_submission(&conn, sid_r).await.unwrap();
