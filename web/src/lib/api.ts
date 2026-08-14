@@ -5,6 +5,8 @@ import type {
 	CollectionsResponse,
 	Config,
 	DashBoardResponse,
+	DownloadRun,
+	DownloadTaskStatus,
 	FavoritesResponse,
 	FullSyncVideoSourceRequest,
 	FullSyncVideoSourceResponse,
@@ -295,6 +297,20 @@ class ApiClient {
 		return this.post<boolean>('/task/download');
 	}
 
+	async getDownloadTaskStatus(): Promise<ApiResponse<DownloadTaskStatus>> {
+		return this.get<DownloadTaskStatus>('/task/download/status');
+	}
+
+	async listDownloadRuns(
+		page?: number,
+		pageSize?: number
+	): Promise<ApiResponse<UpperAutoManageListResponse<DownloadRun>>> {
+		return this.get<UpperAutoManageListResponse<DownloadRun>>('/task/download/runs', {
+			page,
+			pageSize
+		});
+	}
+
 	async getUpperAutoManageStatus(): Promise<ApiResponse<UpperAutoManageStatusResponse>> {
 		return this.get<UpperAutoManageStatusResponse>('/upper-auto-manage/status');
 	}
@@ -419,6 +435,9 @@ const api = {
 	updateConfig: (config: Config) => apiClient.updateConfig(config),
 	getDashboard: () => apiClient.getDashboard(),
 	triggerDownloadTask: () => apiClient.triggerDownloadTask(),
+	getDownloadTaskStatus: () => apiClient.getDownloadTaskStatus(),
+	listDownloadRuns: (page?: number, pageSize?: number) =>
+		apiClient.listDownloadRuns(page, pageSize),
 	getUpperAutoManageStatus: () => apiClient.getUpperAutoManageStatus(),
 	triggerUpperAutoManageRun: () => apiClient.triggerUpperAutoManageRun(),
 	listUpperAutoManageRuns: (page?: number, pageSize?: number) =>

@@ -17,7 +17,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::bilibili::{self, BiliClient, BiliError, Credential, Submission};
 use crate::config::{Config, Trigger, VersionedConfig};
-use crate::task::TaskStatus;
+use crate::task::{TaskStatus, TaskTrigger};
 use crate::utils::notify::error_and_notify;
 
 static INSTANCE: OnceCell<UpperAutoManageTaskManager> = OnceCell::const_new();
@@ -87,10 +87,10 @@ impl UpperAutoManageTaskManager {
     /// slot 占用发生在此处入口，释放在 `execute_inspection` 的 finally（覆盖排队→执行→完成全窗口）。
     #[allow(dead_code)]
     pub async fn run_once(&self) -> Result<bool> {
-        self.run_once_with_trigger(InspectionTrigger::Manual).await
+        self.run_once_with_trigger(TaskTrigger::Manual).await
     }
 
-    pub async fn run_once_with_trigger(&self, trigger: InspectionTrigger) -> Result<bool> {
+    pub async fn run_once_with_trigger(&self, trigger: TaskTrigger) -> Result<bool> {
         // 占用 slot：与定时触发互斥
         {
             let mut slot = self.cx.run_slot.lock().await;
@@ -260,7 +260,7 @@ fn run_inspection_task(
                 warn!("已有 UP 主自动巡检任务排队/执行中，跳过本次定时触发");
                 return;
             }
-            cx.execute_inspection(uuid, l, InspectionTrigger::Scheduled).await;
+            cx.execute_inspection(uuid, l, TaskTrigger::Scheduled).await;
         })
     }
 }
@@ -269,12 +269,7 @@ impl TaskContext {
     /// 共享执行：假定调用方已占用 run_slot。执行巡检、更新状态、finally 释放 slot。
     /// 由定时任务闭包与手动 one-shot 闭包共同调用，保证状态收尾（is_running /
     /// last_run / last_finish / next_run / 错误通知 / slot 释放）逻辑一致。
-    async fn execute_inspection(
-        self: &Arc<Self>,
-        job_uuid: uuid::Uuid,
-        mut sched: JobScheduler,
-        trigger: InspectionTrigger,
-    ) {
+    async fn execute_inspection(self: &Arc<Self>, job_uuid: uuid::Uuid, mut sched: JobScheduler, trigger: TaskTrigger) {
         let _ = self.status_tx.send(TaskStatus {
             is_running: true,
             last_run: Some(chrono::Local::now()),
@@ -374,7 +369,7 @@ async fn run_inspection(
     connection: &DatabaseConnection,
     bili_client: &BiliClient,
     config: &Arc<Config>,
-    trigger: InspectionTrigger,
+    trigger: TaskTrigger,
 ) -> Result<RunStats> {
     let started_at = chrono::Utc::now().naive_utc();
     let run = upper_auto_manage_run::ActiveModel {
@@ -423,6 +418,10 @@ async fn run_inspection(
     }
     .save(connection)
     .await?;
+    // 收尾清理超期运行记录，失败只记日志
+    if let Err(e) = cleanup_expired_upper_auto_manage_runs(connection).await {
+        warn!("清理过期的巡检运行记录失败：{:#}", e);
+    }
     // 若有摘要则通过通知渠道发送
     if let Some(summary) = summary
         && result.is_ok()
@@ -441,7 +440,7 @@ async fn run_inspection_inner(
     bili_client: &BiliClient,
     config: &Arc<Config>,
     run_id: i32,
-    trigger: InspectionTrigger,
+    trigger: TaskTrigger,
 ) -> Result<RunStats> {
     let opt = &config.upper_auto_manage;
     let now = chrono::Utc::now().naive_utc();
@@ -519,7 +518,7 @@ async fn run_inspection_inner(
                     } = outcome;
                     match kind {
                         CheckOutcomeKind::Recovered(latest_pubtime) => {
-                            if matches!(trigger, InspectionTrigger::Manual)
+                            if matches!(trigger, TaskTrigger::Manual)
                                 && matches!(
                                     load_policy_for_submission(connection, submission_id).await?,
                                     Some(UpperManagePolicy::Banned)
@@ -646,10 +645,14 @@ async fn run_inspection_inner(
     Ok(stats)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InspectionTrigger {
-    Scheduled,
-    Manual,
+/// 删除超过保留期（RUN_RETENTION_DAYS）的巡检运行记录，返回删除行数
+async fn cleanup_expired_upper_auto_manage_runs(connection: &DatabaseConnection) -> Result<u64> {
+    let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
+    Ok(upper_auto_manage_run::Entity::delete_many()
+        .filter(upper_auto_manage_run::Column::StartedAt.lt(cutoff))
+        .exec(connection)
+        .await?
+        .rows_affected)
 }
 
 #[derive(FromQueryResult)]
@@ -687,11 +690,11 @@ GROUP BY s.id, s.upper_id, s.upper_name";
 /// 避免破坏「手动禁用不自动恢复」的语义。
 async fn fetch_disabled_for_recheck(
     connection: &DatabaseConnection,
-    trigger: InspectionTrigger,
+    trigger: TaskTrigger,
 ) -> Result<Vec<SubmissionActivity>> {
     let excluded = match trigger {
-        InspectionTrigger::Scheduled => "'blacklist', 'banned'",
-        InspectionTrigger::Manual => "'blacklist'",
+        TaskTrigger::Scheduled => "'blacklist', 'banned'",
+        TaskTrigger::Manual => "'blacklist'",
     };
     let sql = format!(
         "SELECT s.id AS submission_id, s.upper_id AS upper_id, s.upper_name AS upper_name, MAX(v.pubtime) AS last_pubtime
@@ -1075,7 +1078,7 @@ mod tests {
         upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
             .await
             .unwrap();
-        let ids = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+        let ids = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
             .await
             .unwrap()
             .into_iter()
@@ -1097,7 +1100,7 @@ mod tests {
         upsert_policy(&conn, sid_black, Policy::Blacklist, Source::Manual, None)
             .await
             .unwrap();
-        let ids = fetch_disabled_for_recheck(&conn, InspectionTrigger::Manual)
+        let ids = fetch_disabled_for_recheck(&conn, TaskTrigger::Manual)
             .await
             .unwrap()
             .into_iter()
@@ -1256,7 +1259,7 @@ mod tests {
         upsert_policy(&conn, sid, Policy::Normal, Source::Auto, None)
             .await
             .expect("seed auto normal");
-        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+        let candidates = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
             .await
             .expect("query");
         assert!(
@@ -1273,7 +1276,7 @@ mod tests {
         upsert_policy(&conn, sid, Policy::Normal, Source::Manual, Some("用户手动".to_string()))
             .await
             .expect("seed manual normal");
-        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+        let candidates = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
             .await
             .expect("query");
         assert!(
@@ -1297,7 +1300,7 @@ mod tests {
         upsert_policy(&conn, sid_banned, Policy::Banned, Source::Auto, None)
             .await
             .unwrap();
-        let candidates = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
+        let candidates = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled)
             .await
             .expect("query");
         let ids: Vec<i32> = candidates.iter().map(|c| c.submission_id).collect();
@@ -1414,6 +1417,28 @@ mod tests {
         assert!(stats.summary_line().contains("仍不活跃 42"));
     }
 
+    /// 30 天清理：仅删除超期 run 行，保留期内的行不受影响
+    #[tokio::test]
+    async fn cleanup_removes_only_expired_upper_auto_manage_runs() {
+        let (_dir, conn) = setup_test_db().await;
+        let now = Utc::now().naive_utc();
+        let expired = now - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS + 1);
+        for started_at in [expired, now] {
+            upper_auto_manage_run::ActiveModel {
+                started_at: Set(started_at),
+                status: Set(RunStatus::Succeeded),
+                ..Default::default()
+            }
+            .insert(&conn)
+            .await
+            .expect("seed");
+        }
+        let deleted = cleanup_expired_upper_auto_manage_runs(&conn).await.expect("cleanup");
+        assert_eq!(deleted, 1);
+        let remaining = upper_auto_manage_run::Entity::find().all(&conn).await.expect("query");
+        assert_eq!(remaining.len(), 1);
+    }
+
     /// 模拟「阶段二收到 outcome 后处理」的逻辑：Recovered/Banned/StillInactive
     /// 不调网络，可直接走 DB 验证
     #[tokio::test]
@@ -1525,9 +1550,7 @@ mod tests {
         let inactive = fetch_inactive_candidates(&conn).await.unwrap();
         assert!(!inactive.iter().any(|c| c.submission_id == sid));
         // banned UP 不应进入恢复巡检候选（验证不会被自动启用）
-        let recheck = fetch_disabled_for_recheck(&conn, InspectionTrigger::Scheduled)
-            .await
-            .unwrap();
+        let recheck = fetch_disabled_for_recheck(&conn, TaskTrigger::Scheduled).await.unwrap();
         assert!(!recheck.iter().any(|c| c.submission_id == sid));
     }
 

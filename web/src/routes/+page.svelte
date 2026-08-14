@@ -5,14 +5,24 @@
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Chart from '$lib/components/ui/chart/index.js';
+	import * as Table from '$lib/components/ui/table/index.js';
 	import MyChartTooltip from '$lib/components/custom/my-chart-tooltip.svelte';
+	import Pagination from '$lib/components/pagination.svelte';
 	import { curveNatural } from 'd3-shape';
 	import { BarChart, AreaChart } from 'layerchart';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { toast } from 'svelte-sonner';
 	import CloudDownloadIcon from '@lucide/svelte/icons/cloud-download';
 	import api from '$lib/api';
-	import type { DashBoardResponse, SysInfo, ApiError, TaskStatus } from '$lib/types';
+	import type {
+		DashBoardResponse,
+		DownloadRun,
+		DownloadTaskStatus,
+		SysInfo,
+		ApiError,
+		TaskStatus,
+		Trigger
+	} from '$lib/types';
 	import CalendarIcon from '@lucide/svelte/icons/calendar';
 	import CircleCheckBigIcon from '@lucide/svelte/icons/circle-check-big';
 	import ClockIcon from '@lucide/svelte/icons/clock';
@@ -22,14 +32,21 @@
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import HeartIcon from '@lucide/svelte/icons/heart';
+	import HistoryIcon from '@lucide/svelte/icons/history';
 	import MemoryStickIcon from '@lucide/svelte/icons/memory-stick';
 	import PlayIcon from '@lucide/svelte/icons/play';
+	import TimerIcon from '@lucide/svelte/icons/timer';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import VideoIcon from '@lucide/svelte/icons/video';
 
 	let dashboardData = $state<DashBoardResponse | null>(null);
 	let sysInfo = $state<SysInfo | null>(null);
 	let taskStatus = $state<TaskStatus | null>(null);
+	let downloadStatus = $state<DownloadTaskStatus | null>(null);
+	let downloadRuns = $state<DownloadRun[]>([]);
+	let runsTotal = $state(0);
+	let runsPage = $state(0);
+	const runsPageSize = 10;
 	let loading = $state(false);
 	let triggering = $state(false);
 	let memoryHistory = $state<Array<{ time: number; used: number; process: number }>>([]);
@@ -88,6 +105,62 @@
 		} finally {
 			triggering = false;
 		}
+	}
+
+	async function loadDownloadStatus() {
+		try {
+			const res = await api.getDownloadTaskStatus();
+			downloadStatus = res.data;
+		} catch (e) {
+			toast.error('加载下载任务状态失败', { description: (e as ApiError).message });
+		}
+	}
+
+	async function loadDownloadRuns(page = runsPage) {
+		try {
+			const res = await api.listDownloadRuns(page, runsPageSize);
+			downloadRuns = res.data.items;
+			runsTotal = res.data.totalCount;
+			runsPage = page;
+		} catch (e) {
+			toast.error('加载下载任务历史失败', { description: (e as ApiError).message });
+		}
+	}
+
+	// 由 startedAt/finishedAt 推导一轮任务的执行耗时文案
+	function formatDuration(startedAt: string, finishedAt: string | null): string {
+		if (!finishedAt) return '进行中';
+		const seconds = Math.max(
+			0,
+			Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
+		);
+		if (seconds < 60) return `${seconds} 秒`;
+		const minutes = Math.floor(seconds / 60);
+		const restSeconds = seconds % 60;
+		if (minutes < 60) return restSeconds ? `${minutes} 分 ${restSeconds} 秒` : `${minutes} 分钟`;
+		const hours = Math.floor(minutes / 60);
+		const restMinutes = minutes % 60;
+		return restMinutes ? `${hours} 时 ${restMinutes} 分` : `${hours} 小时`;
+	}
+
+	function formatInterval(interval: Trigger): string {
+		if (typeof interval !== 'number') return `Cron：${interval}`;
+		if (interval >= 3600 && interval % 3600 === 0) return `每 ${interval / 3600} 小时`;
+		if (interval >= 60) return `每 ${Math.floor(interval / 60)} 分钟`;
+		return `每 ${interval} 秒`;
+	}
+
+	function formatRunTime(value: string | null): string {
+		return value
+			? new Date(value).toLocaleString('en-US', {
+					month: '2-digit',
+					day: '2-digit',
+					hour: '2-digit',
+					minute: '2-digit',
+					second: '2-digit',
+					hour12: true
+				})
+			: '-';
 	}
 
 	const videoChartConfig = {
@@ -150,9 +223,16 @@
 			pushSysInfo(data);
 		});
 		unsubscribeTasks = api.subscribeToTasks((data: TaskStatus) => {
+			// 运行结束的瞬间刷新耗时与历史（新一轮 run 已落库）
+			if (taskStatus?.is_running && !data.is_running) {
+				loadDownloadStatus();
+				loadDownloadRuns(0);
+			}
 			taskStatus = data;
 		});
 		loadDashboard();
+		loadDownloadStatus();
+		loadDownloadRuns(0);
 		return () => {
 			if (unsubscribeSysInfo) {
 				unsubscribeSysInfo();
@@ -353,6 +433,20 @@
 								</div>
 								<div class="flex items-center justify-between">
 									<div class="flex items-center gap-2">
+										<TimerIcon class="text-muted-foreground h-4 w-4" />
+										<span class="text-sm">上次耗时</span>
+									</div>
+									<span class="text-muted-foreground text-sm">
+										{downloadStatus?.lastRun
+											? formatDuration(
+													downloadStatus.lastRun.startedAt,
+													downloadStatus.lastRun.finishedAt
+												)
+											: '-'}
+									</span>
+								</div>
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-2">
 										<CalendarIcon class="text-muted-foreground h-4 w-4" />
 										<span class="text-sm">下次运行</span>
 									</div>
@@ -367,6 +461,15 @@
 													hour12: true
 												})
 											: '-'}
+									</span>
+								</div>
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-2">
+										<ClockIcon class="text-muted-foreground h-4 w-4" />
+										<span class="text-sm">当前调度</span>
+									</div>
+									<span class="text-muted-foreground text-sm">
+										{downloadStatus ? formatInterval(downloadStatus.interval) : '-'}
 									</span>
 								</div>
 							</div>
@@ -392,6 +495,67 @@
 				</CardContent>
 			</Card>
 		</div>
+
+		<!-- 下载任务执行历史 -->
+		<Card>
+			<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+				<CardTitle class="text-sm font-medium">下载任务执行历史</CardTitle>
+				<HistoryIcon class="text-muted-foreground h-4 w-4" />
+			</CardHeader>
+			<CardContent>
+				<Table.Root>
+					<Table.Header>
+						<Table.Row>
+							<Table.Head>开始时间</Table.Head>
+							<Table.Head>结束时间</Table.Head>
+							<Table.Head class="text-center">耗时</Table.Head>
+							<Table.Head class="text-center">状态</Table.Head>
+							<Table.Head class="text-center">触发方式</Table.Head>
+						</Table.Row>
+					</Table.Header>
+					<Table.Body>
+						{#each downloadRuns as run (run.id)}
+							<Table.Row>
+								<Table.Cell>{formatRunTime(run.startedAt)}</Table.Cell>
+								<Table.Cell>{formatRunTime(run.finishedAt)}</Table.Cell>
+								<Table.Cell class="text-center">
+									{formatDuration(run.startedAt, run.finishedAt)}
+								</Table.Cell>
+								<Table.Cell class="text-center">
+									<Badge
+										variant={run.status === 'failed'
+											? 'destructive'
+											: run.status === 'running'
+												? 'default'
+												: 'outline'}
+									>
+										{run.status === 'failed'
+											? '失败'
+											: run.status === 'running'
+												? '运行中'
+												: '成功'}
+									</Badge>
+								</Table.Cell>
+								<Table.Cell class="text-center"
+									>{run.trigger === 'manual' ? '手动' : '定时'}</Table.Cell
+								>
+							</Table.Row>
+						{:else}
+							<Table.Row>
+								<Table.Cell colspan={5} class="text-muted-foreground text-center"
+									>暂无执行记录</Table.Cell
+								>
+							</Table.Row>
+						{/each}
+					</Table.Body>
+				</Table.Root>
+				<Pagination
+					currentPage={runsPage}
+					totalPages={Math.max(1, Math.ceil(runsTotal / runsPageSize))}
+					onPageChange={(p) => loadDownloadRuns(p)}
+				/>
+			</CardContent>
+		</Card>
 
 		<!-- 第三行：系统监控 -->
 		<div class="grid gap-4 md:grid-cols-2">

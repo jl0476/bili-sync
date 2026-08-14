@@ -459,6 +459,24 @@ export interface TaskStatus {
 	next_run: Date | null;
 }
 
+export type DownloadRunStatus = 'running' | 'succeeded' | 'failed';
+export type DownloadRunTrigger = 'scheduled' | 'manual';
+
+export interface DownloadRun {
+	id: number;
+	startedAt: string;
+	finishedAt: string | null;
+	status: DownloadRunStatus;
+	trigger: DownloadRunTrigger;
+	errorMessage: string | null;
+}
+
+export interface DownloadTaskStatus {
+	taskStatus: TaskStatus;
+	interval: Trigger;
+	lastRun: DownloadRun | null;
+}
+
 export interface UpdateVideoSourceResponse {
 	ruleDisplay: string;
 }

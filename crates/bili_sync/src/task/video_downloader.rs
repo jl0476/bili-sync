@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use sea_orm::DatabaseConnection;
+use bili_sync_entity::download_run::{self, RunTrigger};
+use bili_sync_entity::upper_auto_manage_run::RunStatus;
+use sea_orm::ActiveValue::Set;
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Serialize;
 use tokio::sync::{OnceCell, watch};
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -11,6 +14,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use crate::adapter::VideoSource;
 use crate::bilibili::{self, BiliClient, BiliError};
 use crate::config::{ARGS, Config, TEMPLATE, Trigger, VersionedConfig};
+use crate::task::TaskTrigger;
 use crate::utils::model::get_enabled_video_sources;
 use crate::utils::notify::error_and_notify;
 use crate::workflow::process_video_source;
@@ -75,7 +79,7 @@ impl DownloadTaskManager {
             .await
             .add(Job::new_one_shot_async(
                 Duration::from_secs(0),
-                DownloadTaskManager::download_video_task(self.cx.clone()),
+                DownloadTaskManager::download_video_task(self.cx.clone(), TaskTrigger::Manual),
             )?)
             .await?;
         Ok(())
@@ -125,7 +129,7 @@ impl DownloadTaskManager {
         }
         // 初始化并添加视频下载任务，将任务 ID 保存到 TaskManager 中
         let video_task_id = async {
-            let job_run = DownloadTaskManager::download_video_task(cx.clone());
+            let job_run = DownloadTaskManager::download_video_task(cx.clone(), TaskTrigger::Scheduled);
             let job = match &initial_config.interval {
                 Trigger::Interval(interval) => Job::new_repeated_async(Duration::from_secs(*interval), job_run)?,
                 Trigger::Cron(cron) => Job::new_async_tz(cron, chrono::Local, job_run)?,
@@ -177,7 +181,7 @@ impl DownloadTaskManager {
                             .context("移除旧的视频下载任务失败")?;
                     }
                     let new_video_task_id = async {
-                        let job_run = DownloadTaskManager::download_video_task(cx.clone());
+                        let job_run = DownloadTaskManager::download_video_task(cx.clone(), TaskTrigger::Scheduled);
                         let job = match &new_config.interval {
                             Trigger::Interval(interval) => {
                                 Job::new_repeated_async(Duration::from_secs(*interval), job_run)?
@@ -265,6 +269,7 @@ impl DownloadTaskManager {
 
     fn download_video_task(
         cx: Arc<TaskContext>,
+        trigger: TaskTrigger,
     ) -> impl FnMut(uuid::Uuid, JobScheduler) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         move |uuid, mut l| {
             let cx = cx.clone();
@@ -280,17 +285,43 @@ impl DownloadTaskManager {
                     next_run: None,
                 });
                 info!("开始执行本轮视频下载任务..");
+                // 落一条运行记录；记录失败不阻断下载本身
+                let run_trigger = match trigger {
+                    TaskTrigger::Scheduled => RunTrigger::Scheduled,
+                    TaskTrigger::Manual => RunTrigger::Manual,
+                };
+                let run_id = match create_download_run(&cx.connection, run_trigger).await {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        warn!("创建下载任务运行记录失败：{:#}", e);
+                        None
+                    }
+                };
                 let mut config = VersionedConfig::get().snapshot();
-                match download_video(&cx.connection, &cx.bili_client, &mut config).await {
+                let run_result = download_video(&cx.connection, &cx.bili_client, &mut config).await;
+                match &run_result {
                     Ok(_) => info!("本轮视频下载任务执行完毕"),
                     Err(e) => {
                         error_and_notify(
                             &config,
                             &cx.bili_client,
                             format!("本轮视频下载任务执行遇到错误：{:#}", e),
-                            &e,
+                            e,
                         );
                     }
+                }
+                if let Some(run_id) = run_id {
+                    let (status, error_message) = match run_result {
+                        Ok(_) => (RunStatus::Succeeded, None),
+                        Err(ref e) => (RunStatus::Failed, Some(format!("{:#}", e))),
+                    };
+                    if let Err(e) = finish_download_run(&cx.connection, run_id, status, error_message).await {
+                        warn!("更新下载任务运行记录失败：{:#}", e);
+                    }
+                }
+                // 收尾清理超期运行记录，失败只记日志
+                if let Err(e) = cleanup_expired_download_runs(&cx.connection).await {
+                    warn!("清理过期的下载任务运行记录失败：{:#}", e);
                 }
                 // 注意此处尽量从 updating 中读取 uuid，因为当前任务可能是不存在 next_tick 的 oneshot 任务
                 let task_uuid = (*cx.video_task_id.lock().await).unwrap_or(uuid);
@@ -310,6 +341,46 @@ impl DownloadTaskManager {
             })
         }
     }
+}
+
+/// 创建一条下载任务运行记录（status=running），返回记录 ID
+async fn create_download_run(connection: &DatabaseConnection, trigger: RunTrigger) -> Result<i32> {
+    let run = download_run::ActiveModel {
+        started_at: Set(chrono::Utc::now().naive_utc()),
+        status: Set(RunStatus::Running),
+        trigger: Set(trigger),
+        ..Default::default()
+    };
+    Ok(download_run::Entity::insert(run).exec(connection).await?.last_insert_id)
+}
+
+/// 结束一条运行记录：写入结束时间与最终状态
+async fn finish_download_run(
+    connection: &DatabaseConnection,
+    run_id: i32,
+    status: RunStatus,
+    error_message: Option<String>,
+) -> Result<()> {
+    download_run::ActiveModel {
+        id: Set(run_id),
+        finished_at: Set(Some(chrono::Utc::now().naive_utc())),
+        status: Set(status),
+        error_message: Set(error_message),
+        ..Default::default()
+    }
+    .update(connection)
+    .await?;
+    Ok(())
+}
+
+/// 删除超过保留期（RUN_RETENTION_DAYS）的下载任务运行记录，返回删除行数
+async fn cleanup_expired_download_runs(connection: &DatabaseConnection) -> Result<u64> {
+    let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS);
+    Ok(download_run::Entity::delete_many()
+        .filter(download_run::Column::StartedAt.lt(cutoff))
+        .exec(connection)
+        .await?
+        .rows_affected)
 }
 
 async fn check_and_refresh_credential(
@@ -375,4 +446,73 @@ async fn download_video(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use bili_sync_migration::{Migrator, MigratorTrait};
+
+    use super::*;
+
+    /// 准备一个独立 SQLite 测试库并跑完迁移
+    async fn setup_test_db() -> (async_tempfile::TempDir, DatabaseConnection) {
+        let dir = async_tempfile::TempDir::new().await.expect("create tempdir");
+        let db_path = dir.dir_path().join("test.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
+        let conn = sea_orm::Database::connect(&url).await.expect("connect");
+        Migrator::up(&conn, None).await.expect("migrate");
+        (dir, conn)
+    }
+
+    /// 运行记录生命周期：创建（running、无结束时间）→ 结束（succeeded、有结束时间）
+    #[tokio::test]
+    async fn download_run_lifecycle_records_start_and_finish() {
+        let (_dir, conn) = setup_test_db().await;
+        let run_id = create_download_run(&conn, RunTrigger::Manual).await.expect("create");
+        let running = download_run::Entity::find_by_id(run_id)
+            .one(&conn)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(running.status, RunStatus::Running);
+        assert_eq!(running.trigger, RunTrigger::Manual);
+        assert!(running.finished_at.is_none());
+
+        finish_download_run(&conn, run_id, RunStatus::Succeeded, None)
+            .await
+            .expect("finish");
+        let finished = download_run::Entity::find_by_id(run_id)
+            .one(&conn)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(finished.status, RunStatus::Succeeded);
+        let finished_at = finished.finished_at.expect("finished_at 应已写入");
+        assert!(finished_at >= finished.started_at, "结束时间不应早于开始时间");
+    }
+
+    /// 30 天清理：仅删除超期行，保留期内的行不受影响
+    #[tokio::test]
+    async fn cleanup_removes_only_expired_download_runs() {
+        let (_dir, conn) = setup_test_db().await;
+        let now = chrono::Utc::now().naive_utc();
+        let expired = now - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS + 1);
+        let keep = now - chrono::Duration::days(crate::task::RUN_RETENTION_DAYS - 1);
+        for started_at in [expired, keep] {
+            download_run::ActiveModel {
+                started_at: Set(started_at),
+                status: Set(RunStatus::Succeeded),
+                trigger: Set(RunTrigger::Scheduled),
+                ..Default::default()
+            }
+            .insert(&conn)
+            .await
+            .expect("seed");
+        }
+        let deleted = cleanup_expired_download_runs(&conn).await.expect("cleanup");
+        assert_eq!(deleted, 1);
+        let remaining = download_run::Entity::find().all(&conn).await.expect("query");
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].started_at >= keep, "保留期内的行不应被删除");
+    }
 }

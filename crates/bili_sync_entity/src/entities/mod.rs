@@ -4,6 +4,7 @@ pub mod prelude;
 
 pub mod collection;
 pub mod config;
+pub mod download_run;
 pub mod favorite;
 pub mod page;
 pub mod submission;
