@@ -346,7 +346,7 @@ impl DownloadTaskManager {
 /// 创建一条下载任务运行记录（status=running），返回记录 ID
 async fn create_download_run(connection: &DatabaseConnection, trigger: RunTrigger) -> Result<i32> {
     let run = download_run::ActiveModel {
-        started_at: Set(chrono::Utc::now().naive_utc()),
+        started_at: Set(chrono::Local::now().naive_local()),
         status: Set(RunStatus::Running),
         trigger: Set(trigger),
         ..Default::default()
@@ -363,7 +363,7 @@ async fn finish_download_run(
 ) -> Result<()> {
     download_run::ActiveModel {
         id: Set(run_id),
-        finished_at: Set(Some(chrono::Utc::now().naive_utc())),
+        finished_at: Set(Some(chrono::Local::now().naive_local())),
         status: Set(status),
         error_message: Set(error_message),
         ..Default::default()

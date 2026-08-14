@@ -371,7 +371,7 @@ async fn run_inspection(
     config: &Arc<Config>,
     trigger: TaskTrigger,
 ) -> Result<RunStats> {
-    let started_at = chrono::Utc::now().naive_utc();
+    let started_at = chrono::Local::now().naive_local();
     let run = upper_auto_manage_run::ActiveModel {
         started_at: Set(started_at),
         status: Set(RunStatus::Running),
@@ -402,7 +402,7 @@ async fn run_inspection(
     };
     upper_auto_manage_run::ActiveModel {
         id: Set(run_id),
-        finished_at: Set(Some(chrono::Utc::now().naive_utc())),
+        finished_at: Set(Some(chrono::Local::now().naive_local())),
         status: Set(status),
         checked_count: Set(stats.checked),
         disabled_count: Set(stats.disabled),
