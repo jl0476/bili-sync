@@ -357,16 +357,36 @@
 					</div>
 				</div>
 			{/if}
-			<!-- 最近一次统计 -->
+			<!-- 最近一次统计（检查 = 各桶之和：禁用+正常+无法判定 为启用态；恢复启用+仍不活跃+转黑名单+封禁观察 为禁用态复查） -->
 			{#if status?.lastRun}
 				<div class="mt-4 grid grid-cols-4 gap-2 text-center">
+					<div class="bg-muted/40 rounded p-2">
+						<div class="text-xl font-bold">{status.lastRun.checkedCount}</div>
+						<div class="text-muted-foreground text-xs">检查</div>
+					</div>
 					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold text-red-500">{status.lastRun.disabledCount}</div>
 						<div class="text-muted-foreground text-xs">禁用</div>
 					</div>
 					<div class="bg-muted/40 rounded p-2">
+						<div class="text-xl font-bold text-green-600">{status.lastRun.activeCount}</div>
+						<div class="text-muted-foreground text-xs">正常</div>
+					</div>
+					<div class="bg-muted/40 rounded p-2">
+						<div class="text-muted-foreground text-xl font-bold">
+							{status.lastRun.indeterminateCount}
+						</div>
+						<div class="text-muted-foreground text-xs">无法判定</div>
+					</div>
+					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold text-green-500">{status.lastRun.enabledCount}</div>
-						<div class="text-muted-foreground text-xs">启用</div>
+						<div class="text-muted-foreground text-xs">恢复启用</div>
+					</div>
+					<div class="bg-muted/40 rounded p-2">
+						<div class="text-muted-foreground text-xl font-bold">
+							{status.lastRun.stillInactiveCount}
+						</div>
+						<div class="text-muted-foreground text-xs">仍不活跃</div>
 					</div>
 					<div class="bg-muted/40 rounded p-2">
 						<div class="text-xl font-bold">{status.lastRun.bannedCount}</div>
@@ -468,7 +488,7 @@
 						{/if}
 					{:else}
 						<Table.Row>
-							<Table.Cell colspan={8} class="text-center text-muted-foreground"
+							<Table.Cell colspan={8} class="text-muted-foreground text-center"
 								>暂无任务记录</Table.Cell
 							>
 						</Table.Row>
@@ -526,7 +546,7 @@
 						</Table.Row>
 					{:else}
 						<Table.Row>
-							<Table.Cell colspan={4} class="text-center text-muted-foreground"
+							<Table.Cell colspan={4} class="text-muted-foreground text-center"
 								>暂无操作记录</Table.Cell
 							>
 						</Table.Row>
@@ -640,7 +660,7 @@
 						</Table.Row>
 					{:else}
 						<Table.Row>
-							<Table.Cell colspan={7} class="text-center text-muted-foreground">
+							<Table.Cell colspan={7} class="text-muted-foreground text-center">
 								暂无策略记录。UP
 								主在巡检中被自动禁用、删号转黑名单、或识别为封禁/冻结进入观察后会在此显示，也可手动将
 								UP 设为白名单/黑名单。

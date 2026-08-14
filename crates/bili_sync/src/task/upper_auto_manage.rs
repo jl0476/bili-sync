@@ -284,10 +284,7 @@ impl TaskContext {
         info!("开始执行本轮 UP 主自动巡检任务..");
         let config = VersionedConfig::get().snapshot();
         match run_inspection(&self.connection, &self.bili_client, &config, trigger).await {
-            Ok(stats) => info!(
-                "本轮 UP 主自动巡检任务执行完毕：检查 {}，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}",
-                stats.checked, stats.disabled, stats.enabled, stats.banned, stats.banned_observation, stats.skipped
-            ),
+            Ok(stats) => info!("本轮 UP 主自动巡检任务执行完毕：{}", stats.summary_line()),
             Err(e) => error_and_notify(
                 &config,
                 &self.bili_client,
@@ -318,14 +315,51 @@ impl TaskContext {
     }
 }
 
+/// 巡检统计：各桶定义域互斥，成功轮次满足
+/// `checked = disabled + active + indeterminate + enabled + banned + banned_observation + still_inactive`。
+///
+/// - 阶段一（启用态候选，纯本地判定）：`disabled`（超阈值自动禁用）/ `active`（近期有更新，无需动作）/
+///   `indeterminate`（本地无任何视频，无法判定活跃度）
+/// - 阶段二（禁用态候选，调接口复查）：`enabled`（恢复更新）/ `still_inactive`（仍不活跃，维持禁用）/
+///   `banned`（删号/注销转黑名单）/ `banned_observation`（封禁观察）
 #[derive(Default, Clone)]
 struct RunStats {
     checked: i32,
     disabled: i32,
+    active: i32,
+    indeterminate: i32,
     enabled: i32,
     banned: i32,
     banned_observation: i32,
-    skipped: i32,
+    still_inactive: i32,
+}
+
+impl RunStats {
+    /// 阶段一候选数（启用态）
+    fn phase1_total(&self) -> i32 {
+        self.disabled + self.active + self.indeterminate
+    }
+
+    /// 阶段二候选数（禁用态复查）
+    fn phase2_total(&self) -> i32 {
+        self.enabled + self.banned + self.banned_observation + self.still_inactive
+    }
+
+    fn summary_line(&self) -> String {
+        format!(
+            "检查 {} 个 UP（启用态 {}：禁用 {}、正常 {}、无法判定 {}；禁用态复查 {}：恢复启用 {}、仍不活跃 {}、转黑名单 {}、封禁观察 {}）",
+            self.checked,
+            self.phase1_total(),
+            self.disabled,
+            self.active,
+            self.indeterminate,
+            self.phase2_total(),
+            self.enabled,
+            self.still_inactive,
+            self.banned,
+            self.banned_observation
+        )
+    }
 }
 
 struct PendingAction {
@@ -357,17 +391,16 @@ async fn run_inspection(
         Ok(stats) => (
             RunStatus::Succeeded,
             None,
-            Some(format!(
-                "巡检完成：检查 {} 个 UP，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}",
-                stats.checked, stats.disabled, stats.enabled, stats.banned, stats.banned_observation, stats.skipped
-            )),
+            Some(format!("巡检完成：{}", stats.summary_line())),
             RunStats {
                 checked: stats.checked,
                 disabled: stats.disabled,
+                active: stats.active,
+                indeterminate: stats.indeterminate,
                 enabled: stats.enabled,
                 banned: stats.banned,
                 banned_observation: stats.banned_observation,
-                skipped: stats.skipped,
+                still_inactive: stats.still_inactive,
             },
         ),
         Err(e) => (RunStatus::Failed, Some(format!("{:#}", e)), None, RunStats::default()),
@@ -381,7 +414,9 @@ async fn run_inspection(
         enabled_count: Set(stats.enabled),
         banned_count: Set(stats.banned),
         banned_observation_count: Set(stats.banned_observation),
-        skipped_count: Set(stats.skipped),
+        active_count: Set(stats.active),
+        indeterminate_count: Set(stats.indeterminate),
+        still_inactive_count: Set(stats.still_inactive),
         error_message: Set(error_message),
         summary: Set(summary.clone()),
         ..Default::default()
@@ -418,8 +453,8 @@ async fn run_inspection_inner(
     stats.checked += inactive_candidates.len() as i32;
     for cand in &inactive_candidates {
         let Some(last_pub) = cand.last_pubtime else {
-            // 本地无任何视频，无法判定活跃度，跳过
-            stats.skipped += 1;
+            // 本地无任何视频，无法判定活跃度
+            stats.indeterminate += 1;
             continue;
         };
         let days = (now - last_pub).num_days();
@@ -437,6 +472,9 @@ async fn run_inspection_inner(
                 "UP「{}」({}) 已自动禁用：{} 天未更新",
                 cand.upper_name, cand.submission_id, days
             );
+        } else {
+            // 近期有更新，无需动作
+            stats.active += 1;
         }
     }
 
@@ -501,7 +539,7 @@ async fn run_inspection_inner(
                             });
                         }
                         CheckOutcomeKind::StillInactive => {
-                            stats_arc.lock().await.skipped += 1;
+                            stats_arc.lock().await.still_inactive += 1;
                             let _ = cand;
                         }
                         CheckOutcomeKind::Gone(msg) => {
@@ -559,7 +597,7 @@ async fn run_inspection_inner(
             stats.enabled += inner_stats.enabled;
             stats.banned += inner_stats.banned;
             stats.banned_observation += inner_stats.banned_observation;
-            stats.skipped += inner_stats.skipped;
+            stats.still_inactive += inner_stats.still_inactive;
         }
         pending_actions.extend(pending_actions_arc.lock().await.drain(..));
         if let Err(e) = process_result {
@@ -1302,12 +1340,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn phase1_auto_disables_long_inactive_submission() {
+    async fn phase1_partitions_candidates_into_disabled_active_indeterminate() {
         let (_dir, conn) = setup_test_db().await;
-        let sid = insert_submission(&conn, 111, "old", true).await;
-        // 200 天前的投稿
+        // 超阈值 → 禁用
+        let sid_old = insert_submission(&conn, 111, "old", true).await;
         let old = (Utc::now() - chrono::Duration::days(200)).naive_utc();
-        insert_video(&conn, sid, 111, old).await;
+        insert_video(&conn, sid_old, 111, old).await;
+        // 近期投稿 → 正常，无需动作
+        let sid_recent = insert_submission(&conn, 112, "recent", true).await;
+        let recent = (Utc::now() - chrono::Duration::days(10)).naive_utc();
+        insert_video(&conn, sid_recent, 112, recent).await;
+        // 本地无视频 → 无法判定
+        let sid_novideo = insert_submission(&conn, 113, "novideo", true).await;
 
         let opt = UpperAutoManageOption {
             enabled: true,
@@ -1322,19 +1366,52 @@ mod tests {
         stats.checked += inactive.len() as i32;
         for cand in &inactive {
             let Some(last_pub) = cand.last_pubtime else {
-                stats.skipped += 1;
+                stats.indeterminate += 1;
                 continue;
             };
             let days = (now - last_pub).num_days();
             if days > opt.inactive_threshold_days {
                 disable_submission(&conn, cand.submission_id).await.expect("disable");
                 stats.disabled += 1;
+            } else {
+                stats.active += 1;
             }
         }
-        assert_eq!(stats.checked, 1);
+        assert_eq!(stats.checked, 3);
         assert_eq!(stats.disabled, 1);
-        assert!(!is_submission_enabled(&conn, sid).await.unwrap(), "应被自动禁用");
-        assert!(load_policy(&conn, sid).await.is_none());
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.indeterminate, 1);
+        assert_eq!(stats.checked, stats.phase1_total(), "阶段一各桶应闭合");
+        assert!(!is_submission_enabled(&conn, sid_old).await.unwrap(), "应被自动禁用");
+        assert!(
+            is_submission_enabled(&conn, sid_recent).await.unwrap(),
+            "近期投稿不应被禁用"
+        );
+        assert!(
+            is_submission_enabled(&conn, sid_novideo).await.unwrap(),
+            "无视频 UP 不应被动"
+        );
+        assert!(load_policy(&conn, sid_old).await.is_none());
+    }
+
+    /// 统计口径不变量：检查 = 七个分桶之和（成功轮次）
+    #[test]
+    fn summary_line_partitions_checked_into_buckets() {
+        let stats = RunStats {
+            checked: 178,
+            disabled: 9,
+            active: 127,
+            indeterminate: 0,
+            enabled: 0,
+            banned: 0,
+            banned_observation: 0,
+            still_inactive: 42,
+        };
+        assert_eq!(stats.phase1_total(), 136);
+        assert_eq!(stats.phase2_total(), 42);
+        assert_eq!(stats.phase1_total() + stats.phase2_total(), stats.checked);
+        assert!(stats.summary_line().contains("检查 178 个 UP"));
+        assert!(stats.summary_line().contains("仍不活跃 42"));
     }
 
     /// 模拟「阶段二收到 outcome 后处理」的逻辑：Recovered/Banned/StillInactive

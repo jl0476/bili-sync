@@ -55,7 +55,9 @@ pub struct RunDto {
     pub enabled_count: i32,
     pub banned_count: i32,
     pub banned_observation_count: i32,
-    pub skipped_count: i32,
+    pub active_count: i32,
+    pub indeterminate_count: i32,
+    pub still_inactive_count: i32,
     pub error_message: Option<String>,
     pub summary: Option<String>,
 }
@@ -72,7 +74,9 @@ impl From<upper_auto_manage_run::Model> for RunDto {
             enabled_count: m.enabled_count,
             banned_count: m.banned_count,
             banned_observation_count: m.banned_observation_count,
-            skipped_count: m.skipped_count,
+            active_count: m.active_count,
+            indeterminate_count: m.indeterminate_count,
+            still_inactive_count: m.still_inactive_count,
             error_message: m.error_message,
             summary: m.summary,
         }

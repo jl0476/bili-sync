@@ -15,6 +15,7 @@ mod m20260712_123205_add_filter_option;
 mod m20260811_000001_upper_auto_manage;
 mod m20260812_000001_add_banned_observation_count;
 mod m20260812_000002_add_video_query_indexes;
+mod m20260814_000001_refactor_upper_auto_manage_run_stats;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260811_000001_upper_auto_manage::Migration),
             Box::new(m20260812_000001_add_banned_observation_count::Migration),
             Box::new(m20260812_000002_add_video_query_indexes::Migration),
+            Box::new(m20260814_000001_refactor_upper_auto_manage_run_stats::Migration),
         ]
     }
 }
@@ -52,6 +54,16 @@ mod tests {
             migrations
                 .iter()
                 .any(|migration| migration.name() == "m20260812_000002_add_video_query_indexes")
+        );
+    }
+
+    #[test]
+    fn registers_upper_auto_manage_run_stats_refactor_migration() {
+        let migrations = Migrator::migrations();
+        assert!(
+            migrations
+                .iter()
+                .any(|migration| migration.name() == "m20260814_000001_refactor_upper_auto_manage_run_stats")
         );
     }
 }

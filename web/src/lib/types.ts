@@ -370,7 +370,9 @@ export interface UpperAutoManageRun {
 	enabledCount: number;
 	bannedCount: number;
 	bannedObservationCount: number;
-	skippedCount: number;
+	activeCount: number;
+	indeterminateCount: number;
+	stillInactiveCount: number;
 	errorMessage: string | null;
 	summary: string | null;
 }

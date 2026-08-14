@@ -288,7 +288,7 @@ enum CheckOutcomeKind {
 | Outcome | 写 policy | enabled | reason | action | stats 字段 |
 |---|---|---|---|---|---|
 | `Recovered(pubtime)` | `Normal+Auto`（覆盖现有） | false→true | "检测到新投稿，时间 {pubtime}" | `AutoEnabled` | `enabled` +1 |
-| `StillInactive` | 不写 | false→false | — | — | `skipped` +1 |
+| `StillInactive` | 不写 | false→false | — | — | `still_inactive` +1 |
 | `Gone(msg)` | `Blacklist+Auto`（覆盖） | 保持 false | "UP 已删号/不可恢复：{msg}" | `MarkedBanned` | `banned` +1 |
 | `BannedObservation(msg)` | `Banned+Auto`（覆盖） | 保持 false | "封禁观察，待人工判断：{msg}" | `MarkedBanned` | `banned_observation` +1 |
 
@@ -319,13 +319,32 @@ UpperManagePolicy::Banned => {
 
 ### 3.7 RunStats 扩展
 
-新增 `banned_observation: i32` 字段；summary 字符串更新为：
+新增 `banned_observation: i32` 字段；`RunDto`（API 层）同步加 `banned_observation_count` 字段；前端 `UpperAutoManageRun.bannedObservationCount` 对应；统计栏从 3 列变 4 列。
+
+#### 统计口径重构（m20260814_000001）
+
+原口径的问题：`checked` 混合启用态候选与禁用态复查两个总体；`skipped` 混合「本地无视频无法判定」与「复查仍不活跃」两种语义；阶段一中「近期有更新」的正常 UP 计入 checked 但不进任何桶，数字不闭合。
+
+重构后各桶定义域互斥，成功轮次满足 `checked = disabled + active + indeterminate + enabled + banned + banned_observation + still_inactive`：
+
+| 桶 | 阶段 | 定义 |
+|---|---|---|
+| `checked` | 合计 | 阶段一候选 + 阶段二候选 |
+| `disabled` | 一（启用态） | 超过阈值未更新 → 自动禁用 |
+| `active` | 一（启用态） | 近期有更新，无需动作（新增列） |
+| `indeterminate` | 一（启用态） | 本地无任何视频，无法判定（新增列） |
+| `enabled` | 二（禁用态复查） | 恢复更新 → 重新启用 |
+| `still_inactive` | 二（禁用态复查） | 无新投稿，维持禁用（原 `skipped_count` 重命名） |
+| `banned` | 二 | 删号/注销 → 转黑名单 |
+| `banned_observation` | 二 | 封禁/冻结 → 观察 |
+
+summary 字符串统一为：
 
 ```
-巡检完成：检查 {}，禁用 {}，启用 {}，转黑名单 {}，封禁观察 {}，跳过 {}
+巡检完成：检查 {checked} 个 UP（启用态 {p1}：禁用 {disabled}、正常 {active}、无法判定 {indeterminate}；禁用态复查 {p2}：恢复启用 {enabled}、仍不活跃 {still_inactive}、转黑名单 {banned}、封禁观察 {banned_observation}）
 ```
 
-`RunDto`（API 层）同步加 `banned_observation_count` 字段；前端 `UpperAutoManageRun.bannedObservationCount` 对应；统计栏从 3 列变 4 列。
+迁移：`upper_auto_manage_run` 新增 `active_count`、`indeterminate_count`，`skipped_count` 重命名为 `still_inactive_count`（历史行的混合语义数据整体归入仍不活跃，接受误差）。`RunDto` 与前端 `UpperAutoManageRun` 同步加 `activeCount`、`indeterminateCount`、`stillInactiveCount`；统计栏从 4 格变 8 格（两行）。
 
 ### 3.7.1 巡检任务后端防重（修正版）
 
