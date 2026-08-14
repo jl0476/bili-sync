@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use bili_sync_entity::upper_auto_manage_action::ActionType;
 use bili_sync_entity::upper_auto_manage_policy::{UpperManagePolicy, UpperManageSource};
 use bili_sync_entity::upper_auto_manage_run::RunStatus;
-use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run};
+use bili_sync_entity::{submission, upper_auto_manage_action, upper_auto_manage_policy, upper_auto_manage_run, video};
 use dashmap::DashMap;
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use sea_orm::ActiveValue::Set;
@@ -510,7 +510,7 @@ async fn run_inspection_inner(
                 let stats_arc = stats_arc.clone();
                 let pending_actions_arc = pending_actions_arc.clone();
                 async move {
-                    let outcome = check_disabled_upper(&client, &credential, &cand).await?;
+                    let outcome = check_disabled_upper(connection, &client, &credential, &cand).await?;
                     let CheckOutcome {
                         kind,
                         submission_id,
@@ -727,6 +727,7 @@ struct CheckOutcome {
     upper_name: String,
 }
 
+#[derive(Debug)]
 enum CheckOutcomeKind {
     Recovered(DateTime),
     StillInactive,
@@ -741,7 +742,12 @@ enum CheckOutcomeKind {
 /// 通过 `Submission`/`Dynamic` 的 `into_video_stream` 复用与正常下载完全相同的拉取与解析逻辑，
 /// 自动按 `use_dynamic_api` 走投稿 API 或动态 API——避免对动态 API 专用的 UP 永远
 /// 被判定为"仍不活跃"导致无法自动恢复。
+///
+/// 恢复判定按 bvid 而非时间戳：本地 `videos.pubtime` 来自 Detail API 的 `pubdate`，
+/// 动态探活拿到的是 `module_author.pub_ts`，同一视频两者存在秒级/分钟级偏差，
+/// 时间戳严格比较会把同一条旧视频误判为新投稿，造成「禁用 → 误启用」反复震荡。
 async fn check_disabled_upper(
+    connection: &DatabaseConnection,
     client: &BiliClient,
     credential: &Credential,
     cand: &SubmissionActivity,
@@ -755,7 +761,7 @@ async fn check_disabled_upper(
         Box::pin(Submission::new(client, cand.upper_id.to_string(), credential).into_video_stream())
             as std::pin::Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>
     };
-    let (latest, err) = probe_latest_pubtime(stream.as_mut()).await;
+    let (latest, err) = probe_latest_video(stream.as_mut()).await;
     if let Some(e) = err {
         if let Some(bili_err) = e.downcast_ref::<BiliError>() {
             // 风控优先：中断整轮，避免连环触发
@@ -782,50 +788,78 @@ async fn check_disabled_upper(
         // 其他错误向上传递，由调用方记 warn 跳过
         return Err(e);
     }
-    match latest {
-        Some(latest_pubtime) => {
-            let recovered = match cand.last_pubtime {
-                Some(known) => latest_pubtime > known,
-                None => true,
-            };
-            Ok(CheckOutcome {
-                kind: if recovered {
-                    CheckOutcomeKind::Recovered(latest_pubtime)
-                } else {
-                    CheckOutcomeKind::StillInactive
-                },
-                submission_id: cand.submission_id,
-                upper_name: cand.upper_name.clone(),
-            })
-        }
-        // stream 结束且无错误：UP 无任何可拉取的视频（投稿/动态皆空），视为仍不活跃
-        None => Ok(CheckOutcome {
-            kind: CheckOutcomeKind::StillInactive,
-            submission_id: cand.submission_id,
-            upper_name: cand.upper_name.clone(),
-        }),
-    }
+    // 探活到最大发布时间的视频已存在于本地库 → 不是新投稿
+    let bvid_in_local = match &latest {
+        Some(probe) => video_exists_in_submission(connection, cand.submission_id, &probe.bvid).await?,
+        None => false,
+    };
+    Ok(CheckOutcome {
+        kind: decide_recovery(latest, bvid_in_local),
+        submission_id: cand.submission_id,
+        upper_name: cand.upper_name.clone(),
+    })
 }
 
 /// 探活采样条数：动态 API 单页最多 12 条，多取 1 条容错。
 /// 投稿 API 按发布时间倒序，首条即最新，采样不影响结果。
 const PROBE_SAMPLE_SIZE: usize = 13;
 
-/// 从视频流采样前 [`PROBE_SAMPLE_SIZE`] 条，返回最大发布时间与首个错误（若有）。
+/// 探活采样结果：采样窗口内发布时间最大的那条视频
+#[derive(Debug, Clone, PartialEq)]
+struct ProbeLatest {
+    bvid: String,
+    pubtime: DateTime,
+}
+
+/// 恢复判定：探活到的最新视频 bvid 不在该订阅的本地视频中才算新投稿。
+///
+/// bvid 已在本地 → 仍不活跃；不在本地 → 恢复。本地无视频（`bvid_in_local` 恒为
+/// false）时任何探活结果都视为新投稿，与旧时间戳判定的 `None => true` 语义一致。
+fn decide_recovery(latest: Option<ProbeLatest>, bvid_in_local: bool) -> CheckOutcomeKind {
+    match latest {
+        Some(probe) if !bvid_in_local => CheckOutcomeKind::Recovered(probe.pubtime),
+        Some(_) => CheckOutcomeKind::StillInactive,
+        None => CheckOutcomeKind::StillInactive,
+    }
+}
+
+/// 该订阅的本地视频中是否已存在指定 bvid
+async fn video_exists_in_submission(
+    connection: &DatabaseConnection,
+    submission_id: i32,
+    bvid: &str,
+) -> Result<bool> {
+    Ok(video::Entity::find()
+        .filter(video::Column::SubmissionId.eq(submission_id))
+        .filter(video::Column::Bvid.eq(bvid))
+        .one(connection)
+        .await?
+        .is_some())
+}
+
+/// 从视频流采样前 [`PROBE_SAMPLE_SIZE`] 条，返回发布时间最大的视频与首个错误（若有）。
 ///
 /// 动态 API 的流第一条可能是 UP 置顶的旧视频（adapter::submission 对 idx==0 有同样的
 /// 置顶特判），不能只看第一条，否则置顶旧视频会遮蔽其后更新的动态，导致探活误判。
-async fn probe_latest_pubtime<S>(mut stream: S) -> (Option<DateTime>, Option<anyhow::Error>)
+async fn probe_latest_video<S>(mut stream: S) -> (Option<ProbeLatest>, Option<anyhow::Error>)
 where
     S: Stream<Item = Result<VideoInfo>> + Unpin,
 {
-    let mut latest = None;
+    let mut latest: Option<ProbeLatest> = None;
     let mut sampled = 0;
     while sampled < PROBE_SAMPLE_SIZE {
         match stream.next().await {
             Some(Ok(video_info)) => {
                 let pubtime = video_info.release_datetime().naive_utc();
-                latest = Some(latest.map_or(pubtime, |max: DateTime| max.max(pubtime)));
+                let candidate = ProbeLatest {
+                    bvid: video_info.bvid_owned(),
+                    pubtime,
+                };
+                latest = Some(match latest {
+                    None => candidate,
+                    Some(max) if candidate.pubtime > max.pubtime => candidate,
+                    Some(max) => max,
+                });
                 sampled += 1;
             }
             Some(Err(e)) => return (latest, Some(e)),
@@ -1047,6 +1081,7 @@ mod tests {
         conn: &DatabaseConnection,
         submission_id: i32,
         upper_id: i64,
+        bvid: &str,
         pubtime: chrono::NaiveDateTime,
     ) {
         let am = bili_sync_entity::video::ActiveModel {
@@ -1057,7 +1092,7 @@ mod tests {
             name: Set("v".to_string()),
             path: Set("/tmp/v".to_string()),
             category: Set(0),
-            bvid: Set(format!("BV{:010}", submission_id)),
+            bvid: Set(bvid.to_string()),
             intro: Set(String::new()),
             cover: Set(String::new()),
             ctime: Set(pubtime),
@@ -1285,7 +1320,7 @@ mod tests {
         }
     }
 
-    /// 置顶旧视频在流的第一条，其后有更新的动态：采样必须取到新动态的时间
+    /// 置顶旧视频在流的第一条，其后有更新的动态：采样必须取到新动态的时间与 bvid
     #[tokio::test]
     async fn probe_skips_pinned_old_video_and_takes_max() {
         let old = (Utc::now() - chrono::Duration::days(365)).naive_utc();
@@ -1294,16 +1329,18 @@ mod tests {
             Ok(dynamic_video("BVpinned", old)),
             Ok(dynamic_video("BVnew", recent)),
         ]);
-        let (latest, err) = probe_latest_pubtime(stream).await;
+        let (latest, err) = probe_latest_video(stream).await;
         assert!(err.is_none());
-        assert_eq!(latest, Some(recent), "置顶旧视频不应遮蔽更新的动态");
+        let latest = latest.expect("应采样到最新视频");
+        assert_eq!(latest.pubtime, recent, "置顶旧视频不应遮蔽更新的动态");
+        assert_eq!(latest.bvid, "BVnew");
     }
 
     /// 空流：无视频可拉取 → (None, None)
     #[tokio::test]
     async fn probe_empty_stream_returns_none() {
         let stream = futures::stream::iter(Vec::<Result<VideoInfo>>::new());
-        let (latest, err) = probe_latest_pubtime(stream).await;
+        let (latest, err) = probe_latest_video(stream).await;
         assert!(err.is_none());
         assert_eq!(latest, None);
     }
@@ -1317,9 +1354,67 @@ mod tests {
             Err(anyhow::anyhow!("network error")),
             Ok(dynamic_video("BV2", Utc::now().naive_utc())),
         ]);
-        let (latest, err) = probe_latest_pubtime(stream).await;
+        let (latest, err) = probe_latest_video(stream).await;
         assert!(err.is_some(), "错误应被返回");
-        assert_eq!(latest, Some(t1), "错误前的采样结果不应丢失");
+        let latest = latest.expect("错误前的采样结果不应丢失");
+        assert_eq!(latest.pubtime, t1);
+        assert_eq!(latest.bvid, "BV1");
+    }
+
+    /// 回归测试（2026-08-14）：同一视频的动态 pub_ts 与本地 pubdate 存在秒级偏差，
+    /// 时间戳严格 `>` 比较会把同一条旧视频误判为新投稿，导致「禁用 → 误启用」震荡。
+    /// bvid 判定下，探活到的视频已在本地库中 → 仍不活跃。
+    #[tokio::test]
+    async fn decide_recovery_same_bvid_with_later_pubtime_is_not_recovered() {
+        let stored = (Utc::now() - chrono::Duration::days(34)).naive_utc();
+        // 探活拿到的是同一条视频，pubtime 比本地库晚 8 秒（pub_ts vs pubdate 偏差）
+        let probe = ProbeLatest {
+            bvid: "BVsame".to_string(),
+            pubtime: stored + chrono::Duration::seconds(8),
+        };
+        assert!(matches!(
+            decide_recovery(Some(probe), true),
+            CheckOutcomeKind::StillInactive
+        ));
+    }
+
+    /// 探活到的视频 bvid 不在本地库 → 检测到新投稿，恢复
+    #[tokio::test]
+    async fn decide_recovery_unknown_bvid_is_recovered() {
+        let recent = (Utc::now() - chrono::Duration::days(1)).naive_utc();
+        let probe = ProbeLatest {
+            bvid: "BVnew".to_string(),
+            pubtime: recent,
+        };
+        match decide_recovery(Some(probe), false) {
+            CheckOutcomeKind::Recovered(t) => assert_eq!(t, recent),
+            other => panic!("应为 Recovered，实际 {other:?}"),
+        }
+    }
+
+    /// 探活无结果（无任何可拉取视频）→ 仍不活跃
+    #[tokio::test]
+    async fn decide_recovery_none_probe_is_still_inactive() {
+        assert!(matches!(
+            decide_recovery(None, false),
+            CheckOutcomeKind::StillInactive
+        ));
+    }
+
+    /// 本地库按 submission_id + bvid 查存在性：命中本订阅的视频才算存在，
+    /// 其他订阅下的同 bvid 视频不算
+    #[tokio::test]
+    async fn video_exists_in_submission_matches_bvid_within_same_submission() {
+        let (_dir, conn) = setup_test_db().await;
+        let sid_a = insert_submission(&conn, 800, "up_a", false).await;
+        let sid_b = insert_submission(&conn, 801, "up_b", false).await;
+        let t = (Utc::now() - chrono::Duration::days(30)).naive_utc();
+        insert_video(&conn, sid_a, 800, "BVknown", t).await;
+
+        assert!(video_exists_in_submission(&conn, sid_a, "BVknown").await.unwrap());
+        assert!(!video_exists_in_submission(&conn, sid_a, "BVother").await.unwrap());
+        // 同一视频挂在别的订阅下不算本订阅存在
+        assert!(!video_exists_in_submission(&conn, sid_b, "BVknown").await.unwrap());
     }
 
     #[tokio::test]
@@ -1473,11 +1568,11 @@ mod tests {
         // 超阈值 → 禁用
         let sid_old = insert_submission(&conn, 111, "old", true).await;
         let old = (Utc::now() - chrono::Duration::days(200)).naive_utc();
-        insert_video(&conn, sid_old, 111, old).await;
+        insert_video(&conn, sid_old, 111, "BVold", old).await;
         // 近期投稿 → 正常，无需动作
         let sid_recent = insert_submission(&conn, 112, "recent", true).await;
         let recent = (Utc::now() - chrono::Duration::days(10)).naive_utc();
-        insert_video(&conn, sid_recent, 112, recent).await;
+        insert_video(&conn, sid_recent, 112, "BVrecent", recent).await;
         // 本地无视频 → 无法判定
         let sid_novideo = insert_submission(&conn, 113, "novideo", true).await;
 

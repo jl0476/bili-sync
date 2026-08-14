@@ -283,6 +283,8 @@ enum CheckOutcomeKind {
 - 删除原 `Banned(String)` 避免与新 enum `UpperManagePolicy::Banned` 同名混淆。
 - `Gone` 语义直白，强调"账号已不可逆地不存在"。
 
+恢复判定按 **bvid** 而非时间戳（2026-08-14 修复）：探活采样前 13 条取发布时间最大的视频，其 bvid 已存在于该订阅的本地 `videos` 中 → `StillInactive`；不存在 → `Recovered`。不能用时间戳严格比较——本地 `pubtime` 来自 Detail API 的 `pubdate`，动态探活拿到的是 `module_author.pub_ts`，同一视频两者存在秒级/分钟级偏差，`latest > known` 会把同一条旧视频误判为新投稿，造成「阶段一禁用 → 阶段二误启用」每轮震荡。bvid 判定顺带覆盖本地无视频的情形（bvid 必然不在空集中，与旧 `None => true` 语义一致）。
+
 阶段二 match 行为表：
 
 | Outcome | 写 policy | enabled | reason | action | stats 字段 |
