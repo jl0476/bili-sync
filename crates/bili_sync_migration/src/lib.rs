@@ -17,6 +17,7 @@ mod m20260812_000001_add_banned_observation_count;
 mod m20260812_000002_add_video_query_indexes;
 mod m20260814_000001_refactor_upper_auto_manage_run_stats;
 mod m20260814_000002_create_download_run;
+mod m20260821_025000_mark_empty_tags_for_refetch;
 
 pub struct Migrator;
 
@@ -41,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260812_000002_add_video_query_indexes::Migration),
             Box::new(m20260814_000001_refactor_upper_auto_manage_run_stats::Migration),
             Box::new(m20260814_000002_create_download_run::Migration),
+            Box::new(m20260821_025000_mark_empty_tags_for_refetch::Migration),
         ]
     }
 }
